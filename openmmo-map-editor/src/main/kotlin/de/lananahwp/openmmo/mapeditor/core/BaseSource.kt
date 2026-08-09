@@ -21,6 +21,12 @@ interface BaseSource {
   /** NUM_METATILES_IN_PRIMARY. */
   val primaryMetatileCount: Int
 
+  /** Number of 16-color sub-palettes a primary tileset provides (the split point for palette ids). */
+  val numPalettesPrimary: Int
+
+  /** Total number of 16-color sub-palettes across the primary + secondary tilesets. */
+  val numPalettesTotal: Int
+
   /** Number of 8x8 tiles a tileset provides. */
   fun tileCount(name: String): Int
 

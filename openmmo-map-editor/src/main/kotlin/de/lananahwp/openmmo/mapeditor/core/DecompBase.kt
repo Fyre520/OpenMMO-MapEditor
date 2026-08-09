@@ -172,7 +172,7 @@ object MetatileBehaviorsFiles {
     val file = File(rootDir, "src/data/tilesets/metatiles.h")
     if (!file.exists()) return 2
     val re = Regex("""INCBIN_U(16|32)\("([^"]+)/metatile_attributes\.bin"\)""")
-    return re.findAll(file.readText()).firstOrNull()?.groupValues?.get(1)?.toInt()?.let { if (it == "32") 4 else 2 } ?: 2
+    return re.findAll(file.readText()).firstOrNull()?.groupValues?.get(1)?.let { if (it == "32") 4 else 2 } ?: 2
   }
 
   fun readBehaviorIds(file: File): Map<String, Int> {

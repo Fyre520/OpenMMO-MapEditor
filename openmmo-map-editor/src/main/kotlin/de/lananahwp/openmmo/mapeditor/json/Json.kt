@@ -57,10 +57,10 @@ object JsonParser {
       return when (text[pos]) {
         '{' -> parseObject()
         '[' -> parseArray()
-        '"' -> JStr(parseString())
-        't' -> { expectWord("true"); JBool(true) }
-        'f' -> { expectWord("false"); JBool(false) }
-        'n' -> { expectWord("null"); JNull }
+        '"' -> Json.JStr(parseString())
+        't' -> { expectWord("true"); Json.JBool(true) }
+        'f' -> { expectWord("false"); Json.JBool(false) }
+        'n' -> { expectWord("null"); Json.JNull }
         else -> parseNumber()
       }
     }
@@ -71,11 +71,11 @@ object JsonParser {
       pos += word.length
     }
 
-    private fun parseObject(): JObj {
+    private fun parseObject(): Json.JObj {
       expect('{')
       val map = LinkedHashMap<String, Json>()
       skipWs()
-      if (pos < text.length && text[pos] == '}') { pos++; return JObj(map) }
+      if (pos < text.length && text[pos] == '}') { pos++; return Json.JObj(map) }
       while (true) {
         skipWs()
         if (pos >= text.length || text[pos] != '"') fail("Expected string key")
@@ -86,24 +86,24 @@ object JsonParser {
         when {
           pos >= text.length -> fail("Unterminated object")
           text[pos] == ',' -> pos++
-          text[pos] == '}' -> { pos++; return JObj(map) }
+          text[pos] == '}' -> { pos++; return Json.JObj(map) }
           else -> fail("Expected ',' or '}'")
         }
       }
     }
 
-    private fun parseArray(): JArr {
+    private fun parseArray(): Json.JArr {
       expect('[')
       val list = mutableListOf<Json>()
       skipWs()
-      if (pos < text.length && text[pos] == ']') { pos++; return JArr(list) }
+      if (pos < text.length && text[pos] == ']') { pos++; return Json.JArr(list) }
       while (true) {
         list.add(parseValue())
         skipWs()
         when {
           pos >= text.length -> fail("Unterminated array")
           text[pos] == ',' -> pos++
-          text[pos] == ']' -> { pos++; return JArr(list) }
+          text[pos] == ']' -> { pos++; return Json.JArr(list) }
           else -> fail("Expected ',' or ']'")
         }
       }
@@ -156,7 +156,7 @@ object JsonParser {
         while (pos < text.length && text[pos].isDigit()) pos++
       }
       if (pos == start) fail("Expected a value")
-      return JNum(text.substring(start, pos).toDouble())
+      return Json.JNum(text.substring(start, pos).toDouble())
     }
   }
 }
