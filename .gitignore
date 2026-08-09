@@ -2,7 +2,7 @@
 /porymap/
 
 # Gradle build output
-/.gradle/
+**/.gradle/
 **/build/
 out/
 

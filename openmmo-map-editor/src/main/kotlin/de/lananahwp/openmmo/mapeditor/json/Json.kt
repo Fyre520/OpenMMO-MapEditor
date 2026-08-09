@@ -160,3 +160,63 @@ object JsonParser {
     }
   }
 }
+
+/** Serializes [Json] back to text, preserving key order. Numbers that are integral print without a decimal point. */
+object JsonWriter {
+  fun write(value: Json): String {
+    val sb = StringBuilder()
+    writeValue(sb, value)
+    return sb.toString()
+  }
+
+  private fun writeValue(sb: StringBuilder, value: Json) {
+    when (value) {
+      is Json.JNull -> sb.append("null")
+      is Json.JBool -> sb.append(if (value.value) "true" else "false")
+      is Json.JNum -> {
+        val d = value.value
+        if (d == d.toLong().toDouble() && d in Long.MIN_VALUE.toDouble()..Long.MAX_VALUE.toDouble()) {
+          sb.append(d.toLong())
+        } else {
+          sb.append(d.toString())
+        }
+      }
+      is Json.JStr -> writeString(sb, value.value)
+      is Json.JArr -> {
+        sb.append('[')
+        value.items.forEachIndexed { i, item ->
+          if (i > 0) sb.append(',')
+          writeValue(sb, item)
+        }
+        sb.append(']')
+      }
+      is Json.JObj -> {
+        sb.append('{')
+        value.entries.entries.forEachIndexed { i, (k, v) ->
+          if (i > 0) sb.append(',')
+          writeString(sb, k)
+          sb.append(':')
+          writeValue(sb, v)
+        }
+        sb.append('}')
+      }
+    }
+  }
+
+  private fun writeString(sb: StringBuilder, s: String) {
+    sb.append('"')
+    for (c in s) {
+      when (c) {
+        '"' -> sb.append("\\\"")
+        '\\' -> sb.append("\\\\")
+        '\n' -> sb.append("\\n")
+        '\r' -> sb.append("\\r")
+        '\t' -> sb.append("\\t")
+        '\b' -> sb.append("\\b")
+        '\u000C' -> sb.append("\\f")
+        else -> if (c < ' ') sb.append("\\u").append(c.code.toString(16).padStart(4, '0')) else sb.append(c)
+      }
+    }
+    sb.append('"')
+  }
+}
