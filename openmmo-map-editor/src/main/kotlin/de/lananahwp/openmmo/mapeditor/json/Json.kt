@@ -1,0 +1,162 @@
+package de.lananahwp.openmmo.mapeditor.json
+
+/**
+ * Minimal dependency-free JSON parser. The decomp data files are machine-generated, so a
+ * standards-following recursive descent parser is sufficient.
+ */
+sealed interface Json {
+  data object JNull : Json
+  data class JBool(val value: Boolean) : Json
+  data class JNum(val value: Double) : Json
+  data class JStr(val value: String) : Json
+  data class JArr(val items: List<Json>) : Json
+  data class JObj(val entries: LinkedHashMap<String, Json>) : Json
+
+  fun asObj(): JObj? = this as? JObj
+  fun asArr(): JArr? = this as? JArr
+  fun asStr(): String? = (this as? JStr)?.value
+  fun asInt(): Int? = (this as? JNum)?.value?.toInt()
+  fun asBool(): Boolean? = (this as? JBool)?.value
+
+  fun get(key: String): Json? = (this as? JObj)?.entries?.get(key)
+  fun str(key: String): String? = get(key)?.asStr()
+  fun int(key: String): Int? = get(key)?.asInt()
+  fun arr(key: String): JArr? = get(key)?.asArr()
+  fun obj(key: String): JObj? = get(key)?.asObj()
+}
+
+object JsonParser {
+  fun parse(text: String): Json {
+    val p = Parser(text)
+    val value = p.parseValue()
+    p.skipWs()
+    if (!p.atEnd()) throw IllegalArgumentException("Trailing content at offset ${p.pos}")
+    return value
+  }
+
+  private class Parser(private val text: String) {
+    var pos = 0
+
+    fun atEnd(): Boolean = pos >= text.length
+    fun skipWs() {
+      while (pos < text.length && text[pos].isWhitespace()) pos++
+    }
+
+    private fun fail(msg: String): Nothing =
+        throw IllegalArgumentException("$msg at offset $pos: ...${text.drop(pos).take(40)}")
+
+    private fun expect(c: Char) {
+      skipWs()
+      if (pos >= text.length || text[pos] != c) fail("Expected '$c'")
+      pos++
+    }
+
+    fun parseValue(): Json {
+      skipWs()
+      if (pos >= text.length) fail("Unexpected end of input")
+      return when (text[pos]) {
+        '{' -> parseObject()
+        '[' -> parseArray()
+        '"' -> JStr(parseString())
+        't' -> { expectWord("true"); JBool(true) }
+        'f' -> { expectWord("false"); JBool(false) }
+        'n' -> { expectWord("null"); JNull }
+        else -> parseNumber()
+      }
+    }
+
+    private fun expectWord(word: String) {
+      skipWs()
+      if (!text.startsWith(word, pos)) fail("Expected '$word'")
+      pos += word.length
+    }
+
+    private fun parseObject(): JObj {
+      expect('{')
+      val map = LinkedHashMap<String, Json>()
+      skipWs()
+      if (pos < text.length && text[pos] == '}') { pos++; return JObj(map) }
+      while (true) {
+        skipWs()
+        if (pos >= text.length || text[pos] != '"') fail("Expected string key")
+        val key = parseString()
+        expect(':')
+        map[key] = parseValue()
+        skipWs()
+        when {
+          pos >= text.length -> fail("Unterminated object")
+          text[pos] == ',' -> pos++
+          text[pos] == '}' -> { pos++; return JObj(map) }
+          else -> fail("Expected ',' or '}'")
+        }
+      }
+    }
+
+    private fun parseArray(): JArr {
+      expect('[')
+      val list = mutableListOf<Json>()
+      skipWs()
+      if (pos < text.length && text[pos] == ']') { pos++; return JArr(list) }
+      while (true) {
+        list.add(parseValue())
+        skipWs()
+        when {
+          pos >= text.length -> fail("Unterminated array")
+          text[pos] == ',' -> pos++
+          text[pos] == ']' -> { pos++; return JArr(list) }
+          else -> fail("Expected ',' or ']'")
+        }
+      }
+    }
+
+    private fun parseString(): String {
+      expect('"')
+      val sb = StringBuilder()
+      while (true) {
+        if (pos >= text.length) fail("Unterminated string")
+        val c = text[pos++]
+        when (c) {
+          '"' -> return sb.toString()
+          '\\' -> {
+            if (pos >= text.length) fail("Unterminated escape")
+            when (val e = text[pos++]) {
+              '"' -> sb.append('"')
+              '\\' -> sb.append('\\')
+              '/' -> sb.append('/')
+              'b' -> sb.append('\b')
+              'f' -> sb.append('\u000C')
+              'n' -> sb.append('\n')
+              'r' -> sb.append('\r')
+              't' -> sb.append('\t')
+              'u' -> {
+                if (pos + 4 > text.length) fail("Bad unicode escape")
+                sb.append(text.substring(pos, pos + 4).toInt(16).toChar())
+                pos += 4
+              }
+              else -> fail("Bad escape '\\$e'")
+            }
+          }
+          else -> sb.append(c)
+        }
+      }
+    }
+
+    private fun parseNumber(): Json {
+      skipWs()
+      val start = pos
+      if (pos < text.length && text[pos] == '-') pos++
+      while (pos < text.length && text[pos].isDigit()) pos++
+      if (pos < text.length && text[pos] == '.') {
+        pos++
+        while (pos < text.length && text[pos].isDigit()) pos++
+      }
+      if (pos < text.length && (text[pos] == 'e' || text[pos] == 'E')) {
+        pos++
+        if (pos < text.length && (text[pos] == '+' || text[pos] == '-')) pos++
+        while (pos < text.length && text[pos].isDigit()) pos++
+      }
+      if (pos == start) fail("Expected a value")
+      return JNum(text.substring(start, pos).toDouble())
+    }
+  }
+}

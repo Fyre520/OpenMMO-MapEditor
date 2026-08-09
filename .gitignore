@@ -1,0 +1,9 @@
+# Reference copy of porymap kept outside version control
+/porymap/
+
+# Gradle build output
+/.gradle/
+**/build/
+.idea/
+*.iml
+out/
