@@ -2,7 +2,7 @@ package de.lananahwp.openmmo.mapeditor.project
 
 import java.io.File
 
-/** Maps decomp movement-type names to the server's MovementType ref, matching the codegen. */
+/** Maps decomp movement types to server values. */
 class MovementTypes(private val ids: Map<String, Int>) {
 
   fun ref(name: String): String =

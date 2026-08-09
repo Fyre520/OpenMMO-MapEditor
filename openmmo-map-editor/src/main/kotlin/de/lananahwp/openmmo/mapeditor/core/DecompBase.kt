@@ -4,11 +4,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
 
-/**
- * Base source backed by a PRET decomp project (pokeemerald or pokefirered), typically checked out
- * as a git submodule. Reads the tileset data the way porymap does: metatiles, metatile attributes,
- * behavior constants, the 4bpp tiles image and its JASC palettes.
- */
+/** Reads tileset data from a PRET decomp. */
 class DecompBase(private val rootDir: File) : RegionSource {
 
   override val displayName: String = rootDir.absolutePath
@@ -35,12 +31,30 @@ class DecompBase(private val rootDir: File) : RegionSource {
   override fun isSecondaryTileset(name: String): Boolean =
       MetatileBehaviorsFiles.readTilesetHeaders(rootDir)[name] ?: false
 
-  override val numPalettesPrimary: Int get() = 6
-  override val numPalettesTotal: Int get() = 13
+  override val numPalettesPrimary: Int =
+      MetatileBehaviorsFiles.readNumber(File(rootDir, "include/fieldmap.h"), "NUM_PALS_IN_PRIMARY", 6)
+  override val numPalettesTotal: Int =
+      MetatileBehaviorsFiles.readNumber(File(rootDir, "include/fieldmap.h"), "NUM_PALS_TOTAL", 13)
+  override val numTilesPrimary: Int =
+      MetatileBehaviorsFiles.readNumber(File(rootDir, "include/fieldmap.h"), "NUM_TILES_IN_PRIMARY", 512)
+  override val numTilesTotal: Int =
+      MetatileBehaviorsFiles.readNumber(File(rootDir, "include/fieldmap.h"), "NUM_TILES_TOTAL", 1024)
+  override val metatileAttrWidth: Int get() = attrWidth
 
   private val metatileCache = HashMap<String, IntArray>()
   private val attributeCache = HashMap<String, LongArray>()
   private val pixelsCache = HashMap<String, Array<ByteArray>>()
+
+  /** gTileset_X -> (gMetatiles_X symbol, gMetatileAttributes_X symbol) from headers.h. */
+  private val tilesetSymbols: Map<String, Pair<String, String>> by lazy {
+    MetatileBehaviorsFiles.readTilesetSymbols(rootDir)
+  }
+
+  private fun metatilesSymbol(name: String): String =
+      tilesetSymbols[name]?.first ?: "gMetatiles_${stripPrefix(name)}"
+
+  private fun attributesSymbol(name: String): String =
+      tilesetSymbols[name]?.second ?: "gMetatileAttributes_${stripPrefix(name)}"
 
   override fun tileCount(name: String): Int = pixels(name).size
 
@@ -48,8 +62,9 @@ class DecompBase(private val rootDir: File) : RegionSource {
 
   override fun metatileTiles(name: String): IntArray =
       metatileCache.getOrPut(name) {
-        val path = MetatileBehaviorsFiles.readSymbolIncbins(rootDir, "gMetatiles_${stripPrefix(name)}")
-            ?: return@getOrPut IntArray(0)
+        val path =
+            MetatileBehaviorsFiles.readSymbolIncbins(rootDir, metatilesSymbol(name))
+                ?: return@getOrPut IntArray(0)
         val file = File(rootDir, path)
         if (!file.exists()) IntArray(0)
         else {
@@ -62,8 +77,9 @@ class DecompBase(private val rootDir: File) : RegionSource {
 
   override fun metatileAttributes(name: String): LongArray =
       attributeCache.getOrPut(name) {
-        val path = MetatileBehaviorsFiles.readSymbolIncbins(rootDir, "gMetatileAttributes_${stripPrefix(name)}")
-            ?: return@getOrPut LongArray(0)
+        val path =
+            MetatileBehaviorsFiles.readSymbolIncbins(rootDir, attributesSymbol(name))
+                ?: return@getOrPut LongArray(0)
         val file = File(rootDir, path)
         if (!file.exists()) LongArray(0)
         else {
@@ -85,14 +101,11 @@ class DecompBase(private val rootDir: File) : RegionSource {
   override fun paletteColors(name: String, paletteId: Int): IntArray {
     val dir = tilesetDir(name)
     val file = File(dir, "palettes/${paletteId.toString().padStart(2, '0')}.pal")
-    if (!file.exists()) return grayscalePalette(paletteId)
+    if (!file.exists()) return INVALID_PALETTE.copyOf()
     val colors = JascPal.parse(file)
-    if (colors.size < 16) {
-      val out = colors.toMutableList()
-      while (out.size < 16) out.add(0xFFFFFFFF.toInt())
-      return out.toIntArray()
-    }
-    return colors.take(16).toIntArray()
+    val out = IntArray(16)
+    for (i in 0 until 16) out[i] = colors.getOrElse(i) { INVALID_COLOR }
+    return out
   }
 
   private fun pixels(name: String): Array<ByteArray> =
@@ -105,13 +118,16 @@ class DecompBase(private val rootDir: File) : RegionSource {
         val h = image.height
         if (w % 8 != 0 || h % 8 != 0) return@getOrPut arrayOf()
         val out = mutableListOf<ByteArray>()
+        val raster = image.raster
         for (ty in 0 until h / 8) {
           for (tx in 0 until w / 8) {
             val tile = ByteArray(64)
             for (y in 0 until 8) {
               for (x in 0 until 8) {
-                var v = image.getRGB(tx * 8 + x, ty * 8 + y) and 0xFF
-                v = v and 0x0F // flatten 8bpp to 4bpp like gbagfx
+    // Read indexed tile pixels.
+    // Flatten unexpected 8bpp images.
+                var v = raster.getSample(tx * 8 + x, ty * 8 + y, 0)
+                v = v and 0x0F
                 tile[y * 8 + x] = v.toByte()
               }
             }
@@ -122,22 +138,19 @@ class DecompBase(private val rootDir: File) : RegionSource {
       }
 
   private fun tilesetDir(name: String): File {
-    val path = MetatileBehaviorsFiles.readSymbolIncbins(rootDir, "gMetatiles_${stripPrefix(name)}")
+    val path = MetatileBehaviorsFiles.readSymbolIncbins(rootDir, metatilesSymbol(name))
     val base = path?.substringBeforeLast('/') ?: return rootDir
     return File(rootDir, base)
   }
 
   companion object {
+    const val INVALID_COLOR: Int = 0xFFFF00FF.toInt()
+    private val INVALID_PALETTE = IntArray(16) { INVALID_COLOR }
+
     fun stripPrefix(name: String): String = name.removePrefix("gTileset_")
 
     fun detectRomType(rootDir: File): Int =
         if (MetatileBehaviorsFiles.readAttrWidth(rootDir) == 4) 0 else 1
-
-    private fun grayscalePalette(id: Int): IntArray =
-        IntArray(16) { j ->
-          val v = j * 16 + id
-          (0xFF000000.toInt()) or (v shl 16) or (v shl 8) or v
-        }
   }
 }
 
@@ -161,11 +174,14 @@ object JascPal {
 
 /** File-based helpers shared with the codegen's MetatileBehaviors parser. */
 object MetatileBehaviorsFiles {
-  fun readPrimaryCount(rootDir: File): Int {
-    val file = File(rootDir, "include/fieldmap.h")
-    if (!file.exists()) return 512
-    val re = Regex("""#define\s+NUM_METATILES_IN_PRIMARY\s+(\d+)""")
-    return file.readLines().firstNotNullOfOrNull { re.find(it.trim())?.groupValues?.get(1)?.toInt() } ?: 512
+  fun readPrimaryCount(rootDir: File): Int =
+      readNumber(File(rootDir, "include/fieldmap.h"), "NUM_METATILES_IN_PRIMARY", 512)
+
+  fun readNumber(file: File, define: String, fallback: Int): Int {
+    if (!file.exists()) return fallback
+    val re = Regex("""#define\s+$define\s+(\d+)""")
+    return file.readLines().firstNotNullOfOrNull { re.find(it.trim())?.groupValues?.get(1)?.toInt() }
+        ?: fallback
   }
 
   fun readAttrWidth(rootDir: File): Int {
@@ -213,6 +229,35 @@ object MetatileBehaviorsFiles {
         }
       }
     }
+    return out
+  }
+
+  /** Resolves metatile and attribute symbols. */
+  fun readTilesetSymbols(rootDir: File): LinkedHashMap<String, Pair<String, String>> {
+    val file = File(rootDir, "src/data/tilesets/headers.h")
+    if (!file.exists()) return LinkedHashMap()
+    val out = LinkedHashMap<String, Pair<String, String>>()
+    val tilesetRe = Regex("""const struct Tileset\s+(gTileset_\w+)\s*=""")
+    val metatilesRe = Regex("""\.metatiles\s*=\s*(gMetatiles_\w+)""")
+    val attrsRe = Regex("""\.metatileAttributes\s*=\s*(gMetatileAttributes_\w+)""")
+    var current: String? = null
+    var met: String? = null
+    var att: String? = null
+    fun flush() {
+      if (current != null && met != null && att != null) out[current!!] = met!! to att!!
+    }
+    for (line in file.readLines()) {
+      tilesetRe.find(line)?.let {
+        flush()
+        current = it.groupValues[1]
+        met = null
+        att = null
+      }
+      current ?: continue
+      metatilesRe.find(line)?.let { met = it.groupValues[1] }
+      attrsRe.find(line)?.let { att = it.groupValues[1] }
+    }
+    flush()
     return out
   }
 

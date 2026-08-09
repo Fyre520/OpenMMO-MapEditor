@@ -1,14 +1,10 @@
 package de.lananahwp.openmmo.mapeditor.core
 
-/**
- * A source of tileset data for the editor: metatiles, attributes (collision/behavior), 8x8 tile
- * graphics and palettes. The editor never bundles tilesets; a base source is either a PRET decomp
- * checked out as a submodule ([DecompBase]) or a GBA ROM of the game ([RomBase]).
- */
+/** Supplies tileset graphics, attributes, and palettes. */
 interface BaseSource {
   val displayName: String
 
-  /** 0 for FireRed (Kanto), 1 for Emerald (Hoenn); matches the server romType. */
+  /** Server ROM type. */
   val romType: Int
 
   val behaviorTable: BehaviorTable
@@ -21,11 +17,20 @@ interface BaseSource {
   /** NUM_METATILES_IN_PRIMARY. */
   val primaryMetatileCount: Int
 
-  /** Number of 16-color sub-palettes a primary tileset provides (the split point for palette ids). */
+  /** NUM_TILES_IN_PRIMARY: the split point for absolute VRAM tile ids. */
+  val numTilesPrimary: Int
+
+  /** NUM_TILES_TOTAL: tile ids at or above this are invalid. */
+  val numTilesTotal: Int
+
+  /** Primary palette count. */
   val numPalettesPrimary: Int
 
-  /** Total number of 16-color sub-palettes across the primary + secondary tilesets. */
+  /** Total palette count. */
   val numPalettesTotal: Int
+
+  /** Metatile attribute width. */
+  val metatileAttrWidth: Int
 
   /** Number of 8x8 tiles a tileset provides. */
   fun tileCount(name: String): Int
@@ -33,26 +38,23 @@ interface BaseSource {
   /** Number of metatiles in a tileset. */
   fun metatileCount(name: String): Int
 
-  /**
-   * Flat metatile data for a tileset: one little-endian u16 per tile, 8 tiles per metatile. Each
-   * value packs tileId (bits 0-9), xflip (bit 10), yflip (bit 11), palette (bits 12-15).
-   */
+  /** Reads packed metatile tile data. */
   fun metatileTiles(name: String): IntArray
 
-  /** Raw metatile attribute words for a tileset, one per metatile (u16 on Emerald, u32 on FireRed). */
+  /** Reads metatile attributes. */
   fun metatileAttributes(name: String): LongArray
 
   /** One behavior ordinal per metatile for a tileset. */
   fun behaviorOrdinals(name: String): IntArray
 
-  /** The 64 pixel indices (0-15) of an 8x8 tile in a tileset. */
+  /** Reads tile pixel indices. */
   fun tilePixels(name: String, tileId: Int): ByteArray
 
   /** ARGB colors of one 16-color sub-palette of a tileset. */
   fun paletteColors(name: String, paletteId: Int): IntArray
 }
 
-/** Convenience for a decomp or ROM directory that also knows its region config. */
+/** Adds region metadata to a source. */
 interface RegionSource : BaseSource {
   val region: RegionConfig
 }

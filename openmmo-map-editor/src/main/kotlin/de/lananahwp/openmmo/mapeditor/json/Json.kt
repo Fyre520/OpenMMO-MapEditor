@@ -1,9 +1,6 @@
 package de.lananahwp.openmmo.mapeditor.json
 
-/**
- * Minimal dependency-free JSON parser. The decomp data files are machine-generated, so a
- * standards-following recursive descent parser is sufficient.
- */
+/** Minimal dependency-free JSON model. */
 sealed interface Json {
   data object JNull : Json
   data class JBool(val value: Boolean) : Json
@@ -161,7 +158,7 @@ object JsonParser {
   }
 }
 
-/** Serializes [Json] back to text, preserving key order. Numbers that are integral print without a decimal point. */
+/** Serializes JSON while preserving key order. */
 object JsonWriter {
   fun write(value: Json): String {
     val sb = StringBuilder()
@@ -169,18 +166,65 @@ object JsonWriter {
     return sb.toString()
   }
 
+  /** Pretty-prints using two-space indentation. */
+  fun writePretty(value: Json): String {
+    val sb = StringBuilder()
+    writePrettyValue(sb, value, 0)
+    return sb.toString()
+  }
+
+  private fun writePrettyValue(sb: StringBuilder, value: Json, indent: Int) {
+    when (value) {
+      is Json.JNull -> sb.append("null")
+      is Json.JBool -> sb.append(if (value.value) "true" else "false")
+      is Json.JNum -> sb.append(numToString(value.value))
+      is Json.JStr -> writeString(sb, value.value)
+      is Json.JArr -> {
+        if (value.items.isEmpty()) {
+          sb.append("[]")
+          return
+        }
+        sb.append("[\n")
+        value.items.forEachIndexed { i, item ->
+          sb.append(" ".repeat(indent + 2))
+          writePrettyValue(sb, item, indent + 2)
+          if (i < value.items.size - 1) sb.append(',')
+          sb.append('\n')
+        }
+        sb.append(" ".repeat(indent)).append(']')
+      }
+      is Json.JObj -> {
+        if (value.entries.isEmpty()) {
+          sb.append("{}")
+          return
+        }
+        sb.append("{\n")
+        val entries = value.entries.entries.toList()
+        entries.forEachIndexed { i, (k, v) ->
+          sb.append(" ".repeat(indent + 2))
+          writeString(sb, k)
+          sb.append(": ")
+          writePrettyValue(sb, v, indent + 2)
+          if (i < entries.size - 1) sb.append(',')
+          sb.append('\n')
+        }
+        sb.append(" ".repeat(indent)).append('}')
+      }
+    }
+  }
+
+  private fun numToString(d: Double): String {
+    if (d == d.toLong().toDouble() && d in Long.MIN_VALUE.toDouble()..Long.MAX_VALUE.toDouble()) {
+      return d.toLong().toString()
+    }
+    return d.toString()
+  }
+
   private fun writeValue(sb: StringBuilder, value: Json) {
     when (value) {
       is Json.JNull -> sb.append("null")
       is Json.JBool -> sb.append(if (value.value) "true" else "false")
-      is Json.JNum -> {
-        val d = value.value
-        if (d == d.toLong().toDouble() && d in Long.MIN_VALUE.toDouble()..Long.MAX_VALUE.toDouble()) {
-          sb.append(d.toLong())
-        } else {
-          sb.append(d.toString())
-        }
-      }
+      is Json.JNum -> sb.append(numToString(value.value))
       is Json.JStr -> writeString(sb, value.value)
       is Json.JArr -> {
         sb.append('[')

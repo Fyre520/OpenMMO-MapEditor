@@ -1,6 +1,12 @@
 # Reference copy of porymap kept outside version control
 /porymap/
 
+# Copy of the OpenMMO project (codegen/common/decomp test data) kept outside version control
+/openmmo/
+
+# Local map recovery snapshots
+/.map-reset-backup/
+
 # Gradle build output
 **/.gradle/
 **/build/
