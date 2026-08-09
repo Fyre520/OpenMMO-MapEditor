@@ -2,12 +2,7 @@ package de.lananahwp.openmmo.mapeditor.core
 
 import java.util.Base64
 
-/**
- * Maps raw metatile attribute words to [TileBehavior] and produces the one-behavior-byte-per-tile
- * payload the server expects. Emerald packs attributes as 16-bit words (behavior in bits 0-7),
- * FireRed as 32-bit words (behavior in bits 0-8). Behaviors are classified by name so the two
- * games' differing numeric values do not matter. Ported from the OpenMMO codegen.
- */
+/** Converts metatile attributes into server behavior data. */
 class BehaviorTable(
     val behaviorMask: Int,
     private val idToCategory: Map<Int, TileBehavior>,
@@ -16,10 +11,7 @@ class BehaviorTable(
   fun behaviorOf(attribute: Long): TileBehavior =
       idToCategory[(attribute and behaviorMask.toLong()).toInt()] ?: TileBehavior.NORMAL
 
-  /**
-   * Base64 of one behavior ordinal byte per tile, in the same order as the block data. The arrays
-   * hold one ordinal per metatile for the primary and secondary tilesets.
-   */
+  /** Encodes one behavior byte per map tile. */
   fun behaviorData(
       primaryCount: Int,
       primary: IntArray?,

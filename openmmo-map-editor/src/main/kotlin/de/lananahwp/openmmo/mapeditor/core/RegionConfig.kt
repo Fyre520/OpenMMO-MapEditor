@@ -1,9 +1,6 @@
 package de.lananahwp.openmmo.mapeditor.core
 
-/**
- * Per-region constants for wire bank/palette offsets and value mappings, ported from the OpenMMO
- * codegen so editor output matches what the server expects.
- */
+/** Region-specific server mappings. */
 data class RegionConfig(
     val name: String,
     val regionId: Int,

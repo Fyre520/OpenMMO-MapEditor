@@ -3,11 +3,7 @@ package de.lananahwp.openmmo.mapeditor.model
 import de.lananahwp.openmmo.mapeditor.json.Json
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 
-/**
- * One map's editable state: the live map.json object plus its layout. The JSON object is mutated in
- * place and written back as-is on save, so unknown keys (shared_events_map, scripts etc.) survive a
- * round trip. Layout blocks/border live in their .bin files and are held as u16 lists.
- */
+/** Holds editable map JSON and layout data. */
 class EditorMap(
     val dirName: String,
     val groupName: String,
@@ -15,7 +11,14 @@ class EditorMap(
     val mapIndex: Int,
     val mapJson: Json.JObj,
     val layout: EditorLayout,
+    val exportGroupIndex: Int = groupIndex,
+    val exportMapIndex: Int = mapIndex,
+    val sourceDirName: String = dirName,
+    val sourceMapId: String? = null,
 ) {
+  val isRuntimeOverride: Boolean
+    get() = exportGroupIndex != groupIndex || exportMapIndex != mapIndex || sourceDirName != dirName
+
   val id: String get() = mapJson.str("id") ?: dirName
   val name: String get() = mapJson.str("name") ?: dirName
   val mapType: String get() = mapJson.str("map_type") ?: "MAP_TYPE_INDOOR"
@@ -35,18 +38,15 @@ class EditorMap(
   val connections: List<Json.JObj>
     get() = (mapJson.arr("connections")?.items ?: emptyList()).mapNotNull { it.asObj() }
 
-  /** Writes [mapJson] back to the project's map.json. */
-  fun toJsonString(): String = JsonWriter.write(mapJson)
+  /** Serializes map data for saving. */
+  fun toJsonString(): String = JsonWriter.writePretty(mapJson) + "\n"
 
   fun set(idKey: String, value: Json) {
     mapJson.entries[idKey] = value
   }
 }
 
-/**
- * A map layout: dimension, tilesets and the two u16 arrays that live in the layout's .bin files.
- * [layoutJson] is the live layouts.json entry so width/height/tilesets edits persist on save.
- */
+/** Holds editable layout metadata and blocks. */
 class EditorLayout(
     val name: String,
     val layoutJson: Json.JObj,
@@ -73,6 +73,16 @@ class EditorLayout(
     set(v) {
       layoutJson.entries["secondary_tileset"] = Json.JStr(v)
     }
+  var borderWidth: Int
+    get() = layoutJson.int("border_width") ?: 2
+    set(v) {
+      layoutJson.entries["border_width"] = Json.JNum(v.toDouble())
+    }
+  var borderHeight: Int
+    get() = layoutJson.int("border_height") ?: 2
+    set(v) {
+      layoutJson.entries["border_height"] = Json.JNum(v.toDouble())
+    }
 
   fun tileAt(x: Int, y: Int): Int? =
       if (x in 0 until width && y in 0 until height) blocks.getOrNull(y * width + x) else null
@@ -87,7 +97,7 @@ class EditorLayout(
     val out = ArrayList<Int>(newWidth * newHeight)
     for (y in 0 until newHeight) {
       for (x in 0 until newWidth) {
-        out.add(if (x < width && y < height) blocks[y * width + x] else fill)
+        out.add(if (x < width && y < height) blocks.getOrElse(y * width + x) { fill } else fill)
       }
     }
     blocks.clear()

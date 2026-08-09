@@ -20,3 +20,9 @@ tasks.jar {
   duplicatesStrategy = DuplicatesStrategy.EXCLUDE
   from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
 }
+
+tasks.register<JavaExec>("smokeTest") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.SmokeTestKt")
+}

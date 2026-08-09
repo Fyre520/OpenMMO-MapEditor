@@ -10,10 +10,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/**
- * All identifier tables a decomp provides, in the same forms the OpenMMO codegen reads them so an
- * export matches the generated output.
- */
+/** Identifier tables read from a decomp. */
 class Tables(
     val musicIds: Map<String, Int>,
     val mapsecIds: Map<String, Int>,
@@ -24,11 +21,7 @@ class Tables(
     val movementTypes: MovementTypes,
 )
 
-/**
- * Opens a PRET decomp checked out at [rootDir] ([RegionSource] over the same directory) and exposes
- * its map groups, layouts and tables. Maps are loaded/saved through the group maps list and the
- * shared layouts.json, exactly like the codegen parser reads them.
- */
+/** Loads editable maps from a PRET decomp. */
 class DecompProject(
     val rootDir: File,
     val source: RegionSource,
@@ -40,17 +33,17 @@ class DecompProject(
   val groupMaps: MutableMap<String, MutableList<String>> = LinkedHashMap()
   val layouts: MutableMap<String, Json.JObj> = LinkedHashMap()
 
+  /** Resolved map address. */
+  data class Address(val groupIndex: Int, val mapIndex: Int, val mapDirName: String)
+
+  private val addressesByMap: MutableMap<String, Address> = LinkedHashMap()
+
   init {
     readMapGroups()
     readLayouts()
   }
 
   val region get() = source.region
-
-  /** Map constant (id) or directory name resolving to a group index and directory name. */
-  data class Address(val groupIndex: Int, val mapIndex: Int, val mapDirName: String)
-
-  private val addressesByMap: MutableMap<String, Address> = LinkedHashMap()
 
   private fun readMapGroups() {
     val file = File(rootDir, "data/maps/map_groups.json")
@@ -169,7 +162,7 @@ class DecompProject(
     return file.readLines().firstNotNullOfOrNull { pattern.find(it.trim())?.groupValues?.get(1)?.toInt() }
   }
 
-  // A plain enum where each NATIONAL_DEX_<suffix> takes the next value, starting at NONE = 0.
+  // National Pokédex values increment sequentially.
   private fun enumTable(file: File, prefix: String): Map<String, Int> {
     if (!file.exists()) return emptyMap()
     val re = Regex("""^$prefix(\w+)\s*(?:=\s*(\d+))?,?$""")
@@ -194,6 +187,17 @@ class DecompProject(
 
   fun addressOf(mapDirName: String): Address? = addressesByMap[mapDirName]
 
+  /** Checks map identifier availability. */
+  fun mapExists(name: String): Boolean = addressesByMap.containsKey(name)
+
+  /** Reads matching header constants. */
+  fun constants(filePath: String, prefix: String): List<String> {
+    val f = File(rootDir, filePath)
+    if (!f.exists()) return emptyList()
+    val re = Regex("""#define\s+($prefix\w+)\s+""")
+    return f.readLines().mapNotNull { re.find(it.trim())?.groupValues?.get(1) }.distinct().sorted()
+  }
+
   fun wireBank(groupIndex: Int): Int = groupIndex + region.gbaBankOffset
 
   fun groupIndexOf(wireBank: Int): Int = wireBank - region.gbaBankOffset
@@ -202,7 +206,13 @@ class DecompProject(
 
   fun mapDir(mapConstant: String): String? = addressesByMap[mapConstant]?.mapDirName
 
-  /** Loads a map by its directory name. Returns null when the map.json or layout is missing. */
+  /** Reads map JSON directly. */
+  fun readMapJson(dirName: String): Json.JObj? {
+    val f = File(rootDir, "data/maps/$dirName/map.json")
+    return if (f.exists()) JsonParser.parse(f.readText()).asObj() else null
+  }
+
+  /** Loads a map by directory name. */
   fun loadMap(dirName: String): EditorMap? {
     val addr = addressesByMap[dirName] ?: return null
     val mapJsonFile = File(rootDir, "data/maps/$dirName/map.json")
@@ -211,6 +221,7 @@ class DecompProject(
     val layoutId = mapJson.str("layout") ?: return null
     val layoutJson = layouts[layoutId] ?: return null
     val layout = loadLayout(layoutId)
+    val override = readOverrideMetadata(dirName)
     return EditorMap(
         dirName = dirName,
         groupName = groupOrder[addr.groupIndex],
@@ -218,7 +229,16 @@ class DecompProject(
         mapIndex = addr.mapIndex,
         mapJson = mapJson,
         layout = layout,
+        exportGroupIndex = override?.int("source_group_index") ?: addr.groupIndex,
+        exportMapIndex = override?.int("source_map_index") ?: addr.mapIndex,
+        sourceDirName = override?.str("source_dir") ?: dirName,
+        sourceMapId = override?.str("source_map_id"),
     )
+  }
+
+  private fun readOverrideMetadata(dirName: String): Json.JObj? {
+    val file = File(rootDir, "data/maps/$dirName/.openmmo-override.json")
+    return if (file.isFile) JsonParser.parse(file.readText()).asObj() else null
   }
 
   fun loadLayout(layoutId: String): EditorLayout {
@@ -239,7 +259,7 @@ class DecompProject(
     return out
   }
 
-  /** Writes [map]'s layout bins and patches the layouts.json entry in place. */
+  /** Saves layout blocks and metadata. */
   fun saveLayout(map: EditorMap) {
     val layout = map.layout
     val layoutJson = layout.layoutJson
@@ -259,7 +279,7 @@ class DecompProject(
     file.writeBytes(buf.array())
   }
 
-  /** Persists all layout json edits to layouts.json and saves every map's map.json. */
+  /** Saves map and layout changes. */
   fun save(map: EditorMap) {
     saveLayout(map)
     val mapJsonFile = File(rootDir, "data/maps/${map.dirName}/map.json")
@@ -268,6 +288,213 @@ class DecompProject(
   }
 
   fun saveLayoutsJson() = writeLayoutsJson()
+
+  /** Creates and registers a layout. */
+  fun createLayout(
+      layoutId: String,
+      width: Int,
+      height: Int,
+      primary: String,
+      secondary: String,
+      fillBlock: Int,
+  ): Json.JObj {
+    require(layoutId !in layouts) { "Layout '$layoutId' already exists" }
+    val dir = File(rootDir, "data/layouts/$layoutId")
+    dir.mkdirs()
+    writeU16List(File(dir, "map.bin"), List(width * height) { fillBlock and 0x3FF })
+    writeU16List(File(dir, "border.bin"), List(4) { fillBlock and 0x3FF })
+    val entry =
+        Json.JObj(
+            linkedMapOf(
+                "id" to Json.JStr(layoutId),
+                "name" to Json.JStr("${layoutId.removePrefix("LAYOUT_")}_Layout"),
+                "width" to Json.JNum(width.toDouble()),
+                "height" to Json.JNum(height.toDouble()),
+                "border_width" to Json.JNum(2.0),
+                "border_height" to Json.JNum(2.0),
+                "primary_tileset" to Json.JStr(primary),
+                "secondary_tileset" to Json.JStr(secondary),
+                "border_filepath" to Json.JStr("data/layouts/$layoutId/border.bin"),
+                "blockdata_filepath" to Json.JStr("data/layouts/$layoutId/map.bin"),
+            ))
+    layouts[layoutId] = entry
+    saveLayoutsJson()
+    return entry
+  }
+
+  fun duplicateAsOverride(source: EditorMap, dirName: String, name: String): EditorMap {
+    require(dirName.matches(Regex("[A-Za-z][A-Za-z0-9_]*"))) { "Invalid directory name" }
+    refresh()
+    require(!mapExists(dirName)) { "Map directory '$dirName' already exists" }
+    val layoutId = "LAYOUT_$dirName"
+    require(layoutId !in layouts) { "Layout '$layoutId' already exists" }
+    val groupMaps = groupMaps[source.groupName] ?: error("Unknown map group '${source.groupName}'")
+    val mapId = availableMapConstant(dirName)
+
+    createLayout(
+        layoutId,
+        source.layout.width,
+        source.layout.height,
+        source.layout.primaryTileset,
+        source.layout.secondaryTileset,
+        0,
+    )
+    val copiedLayout = JsonParser.parse(JsonWriter.write(source.layout.layoutJson)).asObj()!!
+    copiedLayout.entries["id"] = Json.JStr(layoutId)
+    copiedLayout.entries["name"] = Json.JStr("${dirName}_Layout")
+    copiedLayout.entries["border_filepath"] =
+        Json.JStr("data/layouts/$layoutId/border.bin")
+    copiedLayout.entries["blockdata_filepath"] =
+        Json.JStr("data/layouts/$layoutId/map.bin")
+    layouts[layoutId] = copiedLayout
+    writeLayoutsJson()
+    val duplicate =
+        createMap(
+            source.groupIndex,
+            groupMaps.size,
+            dirName,
+            mapId,
+            name,
+            layoutId,
+            source.music,
+            source.mapsec,
+            source.weather,
+            source.mapType,
+            source.requiresFlash,
+        )
+    val copiedJson = JsonParser.parse(JsonWriter.write(source.mapJson)).asObj()!!
+    copiedJson.entries["id"] = Json.JStr(mapId)
+    copiedJson.entries["name"] = Json.JStr(name)
+    copiedJson.entries["layout"] = Json.JStr(layoutId)
+    duplicate.mapJson.entries.clear()
+    duplicate.mapJson.entries.putAll(copiedJson.entries)
+    duplicate.layout.blocks.clear()
+    duplicate.layout.blocks.addAll(source.layout.blocks)
+    duplicate.layout.border.clear()
+    duplicate.layout.border.addAll(source.layout.border)
+    duplicate.layout.borderWidth = source.layout.borderWidth
+    duplicate.layout.borderHeight = source.layout.borderHeight
+    save(duplicate)
+
+    val metadata =
+        Json.JObj(
+            linkedMapOf(
+                "source_dir" to Json.JStr(source.sourceDirName),
+                "source_map_id" to Json.JStr(source.sourceMapId ?: source.id),
+                "source_group_index" to Json.JNum(source.exportGroupIndex.toDouble()),
+                "source_map_index" to Json.JNum(source.exportMapIndex.toDouble()),
+            ))
+    val metadataFile = File(rootDir, "data/maps/$dirName/.openmmo-override.json")
+    metadataFile.writeText(JsonWriter.writePretty(metadata) + "\n")
+    refresh()
+    return loadMap(dirName) ?: error("Could not reload '$dirName'")
+  }
+
+  private fun availableMapConstant(dirName: String): String {
+    val snake =
+        dirName
+            .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
+            .replace(Regex("[^A-Za-z0-9]+"), "_")
+            .uppercase()
+            .trim('_')
+    val base = "MAP_$snake"
+    var candidate = base
+    var suffix = 2
+    while (mapExists(candidate)) candidate = "${base}_${suffix++}"
+    return candidate
+  }
+
+  /** Creates and registers a map. */
+  fun createMap(
+      groupIndex: Int,
+      index: Int,
+      dirName: String,
+      id: String,
+      name: String,
+      layoutId: String,
+      music: String,
+      mapsec: String,
+      weather: String,
+      mapType: String,
+      requiresFlash: Boolean,
+  ): EditorMap {
+    require(!mapExists(dirName) && !mapExists(id)) { "A map '$dirName'/'$id' already exists" }
+    val group = ensureGroup(groupIndex)
+    val maps = groupMaps[group] ?: error("Unknown map group '$group'")
+
+    val dir = File(rootDir, "data/maps/$dirName")
+    dir.mkdirs()
+    val mapJson =
+        Json.JObj(
+            linkedMapOf(
+                "id" to Json.JStr(id),
+                "name" to Json.JStr(name),
+                "layout" to Json.JStr(layoutId),
+                "music" to Json.JStr(music),
+                "region_map_section" to Json.JStr(mapsec),
+                "requires_flash" to Json.JBool(requiresFlash),
+                "weather" to Json.JStr(weather),
+                "map_type" to Json.JStr(mapType),
+                "allow_cycling" to Json.JBool(true),
+                "allow_escaping" to Json.JBool(false),
+                "allow_running" to Json.JBool(true),
+                "show_map_name" to Json.JBool(true),
+                "battle_scene" to Json.JStr("MAP_BATTLE_SCENE_NORMAL"),
+                "connections" to Json.JArr(emptyList()),
+                "object_events" to Json.JArr(emptyList()),
+                "warp_events" to Json.JArr(emptyList()),
+                "coord_events" to Json.JArr(emptyList()),
+                "bg_events" to Json.JArr(emptyList()),
+            ))
+    File(dir, "map.json").writeText(JsonWriter.writePretty(mapJson) + "\n")
+
+    val pos = index.coerceIn(0, maps.size)
+    maps.add(pos, dirName)
+    saveMapGroups()
+
+    // Reload addresses after insertion.
+    readMapGroups()
+    return EditorMap(
+        dirName = dirName,
+        groupName = group,
+        groupIndex = groupIndex,
+        mapIndex = pos,
+        mapJson = mapJson,
+        layout = loadLayout(layoutId),
+    )
+  }
+
+  /** Saves map group ordering. */
+  fun saveMapGroups() {
+    val root =
+        Json.JObj(linkedMapOf("group_order" to Json.JArr(groupOrder.map { Json.JStr(it) })))
+    for (group in groupOrder) {
+      root.entries[group] =
+          Json.JArr((groupMaps[group] ?: emptyList()).map { Json.JStr(it) })
+    }
+    val file = File(rootDir, "data/maps/map_groups.json")
+    file.parentFile.mkdirs()
+    file.writeText(JsonWriter.writePretty(root) + "\n")
+  }
+
+  /** Reloads indexes after creating maps or layouts. */
+  fun refresh() {
+    readMapGroups()
+    readLayouts()
+  }
+
+  /** Creates missing map groups through [groupIndex]. */
+  fun ensureGroup(groupIndex: Int): String {
+    require(groupIndex >= 0) { "Map bank is below the region offset" }
+    val offset = region.gbaBankOffset
+    while (groupOrder.size <= groupIndex) {
+      val bank = groupOrder.size + offset
+      val name = "gMapGroup_Bank$bank"
+      groupOrder = groupOrder + name
+      groupMaps[name] = mutableListOf()
+    }
+    return groupOrder[groupIndex]
+  }
 
   private fun writeLayoutsJson() {
     val entries =

@@ -1,9 +1,6 @@
 package de.lananahwp.openmmo.mapeditor.core
 
-/**
- * Normalized tile behavior, mirroring the server's TileBehavior enum. Only the behaviors the
- * server acts on are named; everything else is [NORMAL].
- */
+/** Tile behaviors understood by OpenMMO. */
 enum class TileBehavior {
   NORMAL,
   TALL_GRASS,
@@ -23,10 +20,7 @@ enum class TileBehavior {
   WEST_ARROW_WARP,
 }
 
-/**
- * Classifies an MB_* metatile behavior name into a [TileBehavior]. Ported from the OpenMMO
- * codegen so editor output and the server agree on behavior semantics.
- */
+/** Classifies decomp behavior names. */
 fun classifyBehavior(name: String): TileBehavior? =
     when (name) {
       "MB_TALL_GRASS" -> TileBehavior.TALL_GRASS
