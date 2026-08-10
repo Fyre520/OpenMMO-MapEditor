@@ -7,6 +7,8 @@ import de.lananahwp.openmmo.mapeditor.project.DecompProject
 import de.lananahwp.openmmo.mapeditor.project.OpenmmoExporter
 import de.lananahwp.openmmo.mapeditor.ui.EditorFrame
 import de.lananahwp.openmmo.mapeditor.ui.MapCanvas
+import de.lananahwp.openmmo.mapeditor.ui.MapEventMarker
+import de.lananahwp.openmmo.mapeditor.ui.MapEventType
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
@@ -19,7 +21,16 @@ fun main(args: Array<String>) {
 
   var painted = 0
   var picked: Pair<Int, Int>? = null
-  val testCanvas = MapCanvas({ _, _, _ -> painted++ }, { _, _ -> }, { x, y -> picked = x to y })
+  var moved: Pair<MapEventMarker, Pair<Int, Int>>? = null
+  var context: Pair<MapEventMarker?, Pair<Int, Int>>? = null
+  val testCanvas =
+      MapCanvas(
+          { _, _, _ -> painted++ },
+          { _, _ -> },
+          { x, y -> picked = x to y },
+          { marker, x, y -> moved = marker to (x to y) },
+          { marker, x, y, _, _ -> context = marker to (x to y) },
+      )
   testCanvas.mapImage = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
   testCanvas.blockWidth = 2
   testCanvas.blockHeight = 2
@@ -30,7 +41,20 @@ fun main(args: Array<String>) {
   testCanvas.dispatchEvent(mouse(testCanvas, MouseEvent.MOUSE_PRESSED, 20, 4, MouseEvent.BUTTON3))
   check(painted == 1)
   check(picked == 1 to 0)
-  println("canvas stroke deduplication + eyedropper OK")
+  val marker = MapEventMarker(0, 0, MapEventType.PERSON, 0)
+  testCanvas.eventMarkers = listOf(marker)
+  testCanvas.eventEditingEnabled = true
+  testCanvas.dispatchEvent(mouse(testCanvas, MouseEvent.MOUSE_PRESSED, 4, 4, MouseEvent.BUTTON1))
+  testCanvas.dispatchEvent(
+      mouse(testCanvas, MouseEvent.MOUSE_DRAGGED, 20, 4, MouseEvent.NOBUTTON, InputEvent.BUTTON1_DOWN_MASK))
+  testCanvas.dispatchEvent(mouse(testCanvas, MouseEvent.MOUSE_RELEASED, 20, 4, MouseEvent.BUTTON1))
+  check(painted == 1)
+  check(moved == marker to (1 to 0))
+  testCanvas.dispatchEvent(mouse(testCanvas, MouseEvent.MOUSE_PRESSED, 4, 4, MouseEvent.BUTTON3))
+  check(context == marker to (0 to 0))
+  testCanvas.dispatchEvent(mouse(testCanvas, MouseEvent.MOUSE_PRESSED, 20, 20, MouseEvent.BUTTON3))
+  check(context == null to (1 to 1))
+  println("canvas painting, picking, event dragging, and menus OK")
 
   // 1. Frame constructs, opens project, loads first map, renders.
   val frame = EditorFrame(listOf(root))
