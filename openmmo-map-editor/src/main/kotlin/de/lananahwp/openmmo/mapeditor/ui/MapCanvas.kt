@@ -1,10 +1,11 @@
 package de.lananahwp.openmmo.mapeditor.ui
 
 import java.awt.Color
+import java.awt.Cursor
 import java.awt.Dimension
+import java.awt.Font
 import java.awt.Graphics
 import java.awt.Graphics2D
-import java.awt.Font
 import java.awt.RenderingHints
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -18,13 +19,21 @@ enum class MapEventType {
   WARP,
 }
 
-data class MapEventMarker(val x: Int, val y: Int, val type: MapEventType)
+data class MapEventMarker(
+    val x: Int,
+    val y: Int,
+    val type: MapEventType,
+    val index: Int,
+)
 
 /** Displays and edits the rendered map. */
 class MapCanvas(
     private val onPaintBlock: (x: Int, y: Int, metatileId: Int) -> Unit,
     private val onHover: (x: Int, y: Int) -> Unit,
     private val onPickBlock: (x: Int, y: Int) -> Unit,
+    private val onMoveEvent: (marker: MapEventMarker, x: Int, y: Int) -> Unit = { _, _, _ -> },
+    private val onEventContextMenu:
+        (marker: MapEventMarker?, x: Int, y: Int, px: Int, py: Int) -> Unit = { _, _, _, _, _ -> },
 ) : JPanel() {
 
   var mapImage: BufferedImage? = null
@@ -68,12 +77,21 @@ class MapCanvas(
       repaint()
     }
 
+  var eventEditingEnabled: Boolean = false
+    set(value) {
+      field = value
+      if (!value) cancelEventDrag()
+      cursor = if (value) Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR) else Cursor.getDefaultCursor()
+    }
+
   /** Map dimensions in blocks. */
   var blockWidth = 0
   var blockHeight = 0
 
   private var painting = false
   private val paintedBlocks = HashSet<Pair<Int, Int>>()
+  private var draggedEvent: MapEventMarker? = null
+  private var draggedEventTarget: Pair<Int, Int>? = null
 
   init {
     background = Color(30, 30, 30)
@@ -81,15 +99,33 @@ class MapCanvas(
         object : MouseAdapter() {
           override fun mousePressed(e: MouseEvent) {
             if (e.button == MouseEvent.BUTTON1) {
+              if (eventEditingEnabled) {
+                draggedEvent = eventAt(e.x, e.y)
+                draggedEventTarget = draggedEvent?.let { it.x to it.y }
+                painting = false
+                return
+              }
               painting = true
               paintedBlocks.clear()
               paintAt(e.x, e.y)
             } else if (e.button == MouseEvent.BUTTON3) {
-              blockAt(e.x, e.y)?.let { onPickBlock(it.first, it.second) }
+              blockAt(e.x, e.y)?.let {
+                if (eventEditingEnabled) {
+                  onEventContextMenu(eventAt(e.x, e.y), it.first, it.second, e.x, e.y)
+                } else {
+                  onPickBlock(it.first, it.second)
+                }
+              }
             }
           }
 
           override fun mouseReleased(e: MouseEvent) {
+            val marker = draggedEvent
+            val target = draggedEventTarget
+            if (marker != null && target != null && target != (marker.x to marker.y)) {
+              onMoveEvent(marker, target.first, target.second)
+            }
+            cancelEventDrag()
             painting = false
             paintedBlocks.clear()
           }
@@ -97,7 +133,17 @@ class MapCanvas(
     addMouseMotionListener(
         object : MouseAdapter() {
           override fun mouseDragged(e: MouseEvent) {
-            if (painting) paintAt(e.x, e.y)
+            val marker = draggedEvent
+            if (marker != null) {
+              blockAt(e.x, e.y)?.let {
+                if (it != draggedEventTarget) {
+                  draggedEventTarget = it
+                  repaint()
+                }
+              }
+            } else if (painting) {
+              paintAt(e.x, e.y)
+            }
           }
 
           override fun mouseMoved(e: MouseEvent) {
@@ -120,9 +166,23 @@ class MapCanvas(
   }
 
   private fun paintAt(px: Int, py: Int) {
+    if (eventEditingEnabled) return
     val (bx, by) = blockAt(px, py) ?: return
     if (!paintedBlocks.add(bx to by)) return
     onPaintBlock(bx, by, brush)
+  }
+
+  private fun eventAt(px: Int, py: Int): MapEventMarker? {
+    val block = blockAt(px, py) ?: return null
+    return eventMarkers.asReversed().firstOrNull {
+      it.type in visibleEventTypes && it.x == block.first && it.y == block.second
+    }
+  }
+
+  private fun cancelEventDrag() {
+    draggedEvent = null
+    draggedEventTarget = null
+    repaint()
   }
 
   /** Updates one cached map block. */
@@ -160,7 +220,14 @@ class MapCanvas(
     val size = (16 * zoom).toInt().coerceAtLeast(1)
     val oldFont = g.font
     g.font = oldFont.deriveFont(Font.BOLD, (size * 0.72f).coerceAtLeast(9f))
-    for (marker in eventMarkers) {
+    for (source in eventMarkers) {
+      val target = draggedEventTarget
+      val marker =
+          if (source == draggedEvent && target != null) {
+            source.copy(x = target.first, y = target.second)
+          } else {
+            source
+          }
       if (marker.type !in visibleEventTypes) continue
       if (marker.x !in 0 until blockWidth || marker.y !in 0 until blockHeight) continue
       val px = marker.x * size

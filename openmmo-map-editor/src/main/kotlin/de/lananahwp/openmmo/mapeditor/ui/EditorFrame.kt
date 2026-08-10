@@ -4,6 +4,7 @@ import de.lananahwp.openmmo.mapeditor.core.DecompBase
 import de.lananahwp.openmmo.mapeditor.core.MapRenderer
 import de.lananahwp.openmmo.mapeditor.core.RenderOverlay
 import de.lananahwp.openmmo.mapeditor.json.Json
+import de.lananahwp.openmmo.mapeditor.json.JsonParser
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 import de.lananahwp.openmmo.mapeditor.model.EditorMap
 import de.lananahwp.openmmo.mapeditor.model.MetatileBrush
@@ -13,6 +14,8 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.io.File
@@ -30,6 +33,7 @@ import javax.swing.JMenuBar
 import javax.swing.JMenuItem
 import javax.swing.JOptionPane
 import javax.swing.JPanel
+import javax.swing.JPopupMenu
 import javax.swing.JRadioButtonMenuItem
 import javax.swing.JScrollPane
 import javax.swing.JSplitPane
@@ -66,9 +70,12 @@ private enum class EditMode {
   COLLISION,
   ELEVATION,
   WARP,
+  EVENTS,
 }
 
 private data class TileEdit(val x: Int, val y: Int, val before: Int, val after: Int)
+
+private data class CopiedEvent(val type: MapEventType, val event: Json.JObj)
 
 /** Main map editor window. */
 class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
@@ -88,6 +95,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var activeBrush = MetatileBrush.single(0)
   private val undoStack = ArrayDeque<List<TileEdit>>()
   private val redoStack = ArrayDeque<List<TileEdit>>()
+  private var copiedEvent: CopiedEvent? = null
 
   private val collisionPaint = JCheckBox("Paint collision")
   private val elevationPaint = JCheckBox("Paint elevation")
@@ -107,6 +115,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           { x, y, mid -> paintBlock(x, y, mid) },
           { x, y -> hoverBlock(x, y) },
           { x, y -> pickBlock(x, y) },
+          { marker, x, y -> moveEvent(marker, x, y) },
+          { marker, x, y, px, py -> showEventContextMenu(marker, x, y, px, py) },
       )
   private val zoomLabel = JLabel("100%")
   private val status = JLabel("Open a decomp (File -> Open Decomp)")
@@ -167,6 +177,20 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val userObject = (e.path?.lastPathComponent as? DefaultMutableTreeNode)?.userObject
       if (userObject is MapRef) openMap(userObject)
     }
+    tree.addMouseListener(
+        object : MouseAdapter() {
+          override fun mouseReleased(e: MouseEvent) {
+            if (!SwingUtilities.isRightMouseButton(e)) return
+            val path = tree.getPathForLocation(e.x, e.y) ?: return
+            val ref = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? MapRef ?: return
+            val menu = JPopupMenu()
+            menu.add(
+                JMenuItem("Duplicate as Runtime Override…").apply {
+                  addActionListener { duplicateAsOverride(ref) }
+                })
+            menu.show(tree, e.x, e.y)
+          }
+        })
     locationsList.addListSelectionListener {
       if (!it.valueIsAdjusting) {
         val idx = locationsList.selectedIndex
@@ -226,6 +250,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (collisionPaint.isSelected) {
         elevationPaint.isSelected = false
         warpPaint.isSelected = false
+        eventOverlayPaint.isSelected = false
         editMode = EditMode.COLLISION
         overlay = RenderOverlay.Collision
       } else {
@@ -239,6 +264,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (elevationPaint.isSelected) {
         collisionPaint.isSelected = false
         warpPaint.isSelected = false
+        eventOverlayPaint.isSelected = false
         editMode = EditMode.ELEVATION
         overlay = RenderOverlay.Elevation
       } else {
@@ -264,6 +290,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       updateEventOverlayVisibility()
     }
     eventOverlayPaint.addActionListener {
+      if (eventOverlayPaint.isSelected) {
+        collisionPaint.isSelected = false
+        elevationPaint.isSelected = false
+        warpPaint.isSelected = false
+        editMode = EditMode.EVENTS
+        if (overlay != RenderOverlay.None) {
+          overlay = RenderOverlay.None
+          refreshMapImage()
+        }
+      } else {
+        editMode = EditMode.TILE
+      }
       updateEventOverlayVisibility()
     }
     grid.addActionListener {
@@ -466,9 +504,21 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
-  private fun duplicateAsOverride() {
-    val holder = currentHolder ?: return
-    val map = currentMap ?: return
+  private fun duplicateAsOverride(ref: MapRef? = null) {
+    val holder = ref?.holder ?: currentHolder ?: return
+    val current = currentRef
+    val usesCurrentMap = ref == null || current?.holder === holder && current.dirName == ref.dirName
+    if (!usesCurrentMap && dirty && !confirmMapChange()) return
+    val map = if (usesCurrentMap) currentMap else ref?.let { holder.project.loadMap(it.dirName) }
+    if (map == null) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Cannot load map ${ref?.dirName.orEmpty()}.",
+          "Duplicate failed",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
     var suggested = "${map.dirName}_Custom"
     var suffix = 2
     while (holder.project.mapExists(suggested)) suggested = "${map.dirName}_Custom${suffix++}"
@@ -705,10 +755,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     collisionPaint.isSelected = mode == EditMode.COLLISION
     elevationPaint.isSelected = mode == EditMode.ELEVATION
     warpPaint.isSelected = mode == EditMode.WARP
+    eventOverlayPaint.isSelected = mode == EditMode.EVENTS
     updateEventOverlayVisibility()
   }
 
   private fun updateEventOverlayVisibility() {
+    canvas.eventEditingEnabled = editMode == EditMode.EVENTS
     when {
       eventOverlayPaint.isSelected -> {
         canvas.visibleEventTypes = MapEventType.entries.toSet()
@@ -763,6 +815,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun paintBlock(x: Int, y: Int, brushValue: Int) {
+    if (editMode == EditMode.EVENTS) return
     if (editMode == EditMode.WARP) {
       addWarp(x, y, elevationBrush)
       selectEditMode(EditMode.TILE)
@@ -1037,10 +1090,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     val markers = mutableListOf<MapEventMarker>()
     fun add(events: List<Json.JObj>, type: MapEventType) {
-      for (event in events) {
+      for ((index, event) in events.withIndex()) {
         val x = event.int("x") ?: continue
         val y = event.int("y") ?: continue
-        markers += MapEventMarker(x, y, type)
+        markers += MapEventMarker(x, y, type, index)
       }
     }
     add(map.objects, MapEventType.PERSON)
@@ -1049,6 +1102,102 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     add(map.warps, MapEventType.WARP)
     canvas.eventMarkers = markers
   }
+
+  private fun moveEvent(marker: MapEventMarker, x: Int, y: Int) {
+    val map = currentMap ?: return
+    val event = eventFor(map, marker) ?: return
+    if (event.int("x") == x && event.int("y") == y) return
+    event.entries["x"] = Json.JNum(x.toDouble())
+    event.entries["y"] = Json.JNum(y.toDouble())
+    markDirty()
+    eventsPanel.setMap(map)
+    refreshEventOverlay()
+    status.text = "Moved ${marker.type.name.lowercase()} event ${marker.index} to ($x, $y)"
+  }
+
+  private fun showEventContextMenu(
+      marker: MapEventMarker?,
+      x: Int,
+      y: Int,
+      px: Int,
+      py: Int,
+  ) {
+    val menu = JPopupMenu()
+    if (marker == null) {
+      val item = JMenuItem("Paste Event")
+      item.isEnabled = copiedEvent != null
+      item.addActionListener { pasteEvent(x, y) }
+      menu.add(item)
+    } else {
+      menu.add(JMenuItem("Copy Event").apply { addActionListener { copyEvent(marker) } })
+      if (marker.type == MapEventType.WARP) {
+        menu.add(
+            JMenuItem("Go to Connected Map").apply {
+              addActionListener { goToConnectedMap(marker) }
+            })
+      }
+    }
+    menu.show(canvas, px, py)
+  }
+
+  private fun copyEvent(marker: MapEventMarker) {
+    val map = currentMap ?: return
+    val event = eventFor(map, marker) ?: return
+    val copy = JsonParser.parse(JsonWriter.write(event)).asObj() ?: return
+    copiedEvent = CopiedEvent(marker.type, copy)
+    status.text = "Copied ${marker.type.name.lowercase()} event ${marker.index}"
+  }
+
+  private fun pasteEvent(x: Int, y: Int) {
+    val map = currentMap ?: return
+    val copied = copiedEvent ?: return
+    val event = JsonParser.parse(JsonWriter.write(copied.event)).asObj() ?: return
+    event.entries["x"] = Json.JNum(x.toDouble())
+    event.entries["y"] = Json.JNum(y.toDouble())
+    val key = eventArrayKey(copied.type)
+    val items = map.mapJson.arr(key)?.items.orEmpty() + event
+    map.mapJson.entries[key] = Json.JArr(items)
+    markDirty()
+    eventsPanel.setMap(map)
+    refreshEventOverlay()
+    status.text = "Pasted ${copied.type.name.lowercase()} event at ($x, $y)"
+  }
+
+  private fun goToConnectedMap(marker: MapEventMarker) {
+    val map = currentMap ?: return
+    val holder = currentHolder ?: return
+    val warp = eventFor(map, marker) ?: return
+    val destination = warp.str("dest_map")
+    val directory = destination?.let(holder.project::mapDir)
+    if (directory == null) {
+      JOptionPane.showMessageDialog(
+          this,
+          "The connected map could not be found.",
+          "Warp Destination",
+          JOptionPane.INFORMATION_MESSAGE,
+      )
+      return
+    }
+    groupsSearch.text = ""
+    locationsSearch.text = ""
+    selectMap(holder, directory)
+  }
+
+  private fun eventFor(map: EditorMap, marker: MapEventMarker): Json.JObj? =
+      when (marker.type) {
+        MapEventType.PERSON -> map.objects.getOrNull(marker.index)
+        MapEventType.SCRIPT -> map.bgEvents.getOrNull(marker.index)
+        MapEventType.TRIGGER -> map.coordEvents.getOrNull(marker.index)
+        MapEventType.WARP -> map.warps.getOrNull(marker.index)
+      }
+
+  private fun eventArrayKey(type: MapEventType): String =
+      when (type) {
+        MapEventType.PERSON -> "object_events"
+        MapEventType.SCRIPT -> "bg_events"
+        MapEventType.TRIGGER -> "coord_events"
+        MapEventType.WARP -> "warp_events"
+      }
 
   private fun connectWarp(idx: Int) {
     val map = currentMap ?: return
