@@ -14,6 +14,8 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.io.File
@@ -175,6 +177,20 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val userObject = (e.path?.lastPathComponent as? DefaultMutableTreeNode)?.userObject
       if (userObject is MapRef) openMap(userObject)
     }
+    tree.addMouseListener(
+        object : MouseAdapter() {
+          override fun mouseReleased(e: MouseEvent) {
+            if (!SwingUtilities.isRightMouseButton(e)) return
+            val path = tree.getPathForLocation(e.x, e.y) ?: return
+            val ref = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? MapRef ?: return
+            val menu = JPopupMenu()
+            menu.add(
+                JMenuItem("Duplicate as Runtime Override…").apply {
+                  addActionListener { duplicateAsOverride(ref) }
+                })
+            menu.show(tree, e.x, e.y)
+          }
+        })
     locationsList.addListSelectionListener {
       if (!it.valueIsAdjusting) {
         val idx = locationsList.selectedIndex
@@ -488,9 +504,21 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
-  private fun duplicateAsOverride() {
-    val holder = currentHolder ?: return
-    val map = currentMap ?: return
+  private fun duplicateAsOverride(ref: MapRef? = null) {
+    val holder = ref?.holder ?: currentHolder ?: return
+    val current = currentRef
+    val usesCurrentMap = ref == null || current?.holder === holder && current.dirName == ref.dirName
+    if (!usesCurrentMap && dirty && !confirmMapChange()) return
+    val map = if (usesCurrentMap) currentMap else ref?.let { holder.project.loadMap(it.dirName) }
+    if (map == null) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Cannot load map ${ref?.dirName.orEmpty()}.",
+          "Duplicate failed",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
     var suggested = "${map.dirName}_Custom"
     var suffix = 2
     while (holder.project.mapExists(suggested)) suggested = "${map.dirName}_Custom${suffix++}"
