@@ -27,6 +27,17 @@ class MapRenderer(private val source: BaseSource) {
     const val UNUSED_TILE_SPLIT = 0x0000
 
     private const val INVALID = 0xFFFF00FF.toInt()
+    private val COLLISION_COLORS = mapOf(
+        0 to java.awt.Color(105, 45, 150, 160),
+        1 to java.awt.Color(210, 35, 35, 160),
+        2 to java.awt.Color(210, 120, 35, 160),
+        3 to java.awt.Color(35, 120, 210, 160),
+    )
+    private val OVERLAY_FONT_SIZE = 11f
+    private val OVERLAY_FONT = java.awt.Font("Dialog", java.awt.Font.BOLD, 12)
+    private val COLLISION_COMPOSITE = java.awt.AlphaComposite.SrcOver.derive(0.42f)
+    private val COLLISION_COMPOSITE_STRONG = java.awt.AlphaComposite.SrcOver.derive(0.95f)
+    private val ELEVATION_COMPOSITE = java.awt.AlphaComposite.SrcOver.derive(0.35f)
   }
 
   private data class TileKey(
@@ -231,12 +242,12 @@ class MapRenderer(private val source: BaseSource) {
     when (overlay) {
       RenderOverlay.Collision -> {
         val label = if (collision == 0) "C" else collision.toString()
-        g.composite = AlphaComposite.SrcOver.derive(0.42f)
-        g.color = if (collision == 0) Color(105, 45, 150) else Color(210, 35, 35)
+        g.composite = COLLISION_COMPOSITE
+        g.color = COLLISION_COLORS[collision] ?: COLLISION_COLORS[0]!!
         g.fillRect(x, y, METATILE_SIZE, METATILE_SIZE)
-        g.composite = AlphaComposite.SrcOver.derive(0.95f)
-        g.color = Color.WHITE
-        g.font = oldFont.deriveFont(Font.BOLD, 11f)
+        g.composite = COLLISION_COMPOSITE_STRONG
+        g.color = java.awt.Color.WHITE
+        g.font = OVERLAY_FONT
         val metrics = g.fontMetrics
         val tx = x + (METATILE_SIZE - metrics.stringWidth(label)) / 2
         val ty = y + (METATILE_SIZE - metrics.height) / 2 + metrics.ascent
@@ -244,8 +255,8 @@ class MapRenderer(private val source: BaseSource) {
       }
       RenderOverlay.Elevation ->
           if (elevation > 0) {
-            g.composite = AlphaComposite.SrcOver.derive(0.35f)
-            g.color = Color.CYAN
+            g.composite = ELEVATION_COMPOSITE
+            g.color = java.awt.Color.CYAN
             g.fillRect(x, y + METATILE_SIZE - elevation, METATILE_SIZE, elevation)
           }
       RenderOverlay.None -> {}

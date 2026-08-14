@@ -38,6 +38,10 @@ class DecompProject(
 
   private val addressesByMap: MutableMap<String, Address> = LinkedHashMap()
 
+  private val mapIdCache = HashMap<String, String?>()
+  private val editorMapCache = HashMap<String, EditorMap>()
+  private val layoutBlockCache = HashMap<String, EditorLayout>()
+
   init {
     readMapGroups()
     readLayouts()
@@ -68,11 +72,12 @@ class DecompProject(
     }
   }
 
-  private fun readMapId(dirName: String): String? {
-    val f = File(rootDir, "data/maps/$dirName/map.json")
-    if (!f.exists()) return null
-    return JsonParser.parse(f.readText()).asObj()?.str("id")
-  }
+  private fun readMapId(dirName: String): String? =
+      mapIdCache.getOrPut(dirName) {
+        val f = File(rootDir, "data/maps/$dirName/map.json")
+        if (!f.exists()) null
+        else JsonParser.parse(f.readText()).asObj()?.str("id")
+      }
 
   private fun readLayouts() {
     val file = File(rootDir, "data/layouts/layouts.json")
@@ -213,7 +218,8 @@ class DecompProject(
   }
 
   /** Loads a map by directory name. */
-  fun loadMap(dirName: String): EditorMap? {
+fun loadMap(dirName: String): EditorMap? {
+    editorMapCache[dirName]?.let { return it }
     val addr = addressesByMap[dirName] ?: return null
     val mapJsonFile = File(rootDir, "data/maps/$dirName/map.json")
     if (!mapJsonFile.exists()) return null
@@ -222,7 +228,7 @@ class DecompProject(
     val layoutJson = layouts[layoutId] ?: return null
     val layout = loadLayout(layoutId)
     val override = readOverrideMetadata(dirName)
-    return EditorMap(
+    val map = EditorMap(
         dirName = dirName,
         groupName = groupOrder[addr.groupIndex],
         groupIndex = addr.groupIndex,
@@ -234,6 +240,8 @@ class DecompProject(
         sourceDirName = override?.str("source_dir") ?: dirName,
         sourceMapId = override?.str("source_map_id"),
     )
+    editorMapCache[dirName] = map
+    return map
   }
 
   private fun readOverrideMetadata(dirName: String): Json.JObj? {
@@ -242,12 +250,15 @@ class DecompProject(
   }
 
   fun loadLayout(layoutId: String): EditorLayout {
+    layoutBlockCache[layoutId]?.let { return it }
     val layoutJson = layouts[layoutId] ?: error("Unknown layout '$layoutId'")
     val blocksPath = layoutJson.str("blockdata_filepath") ?: "data/layouts/$layoutId/map.bin"
     val borderPath = layoutJson.str("border_filepath") ?: "data/layouts/$layoutId/border.bin"
     val blocks = readU16List(File(rootDir, blocksPath))
     val border = readU16List(File(rootDir, borderPath))
-    return EditorLayout(name = layoutId, layoutJson = layoutJson, blocks = blocks, border = border)
+    return EditorLayout(name = layoutId, layoutJson = layoutJson, blocks = blocks, border = border).also {
+      layoutBlockCache[layoutId] = it
+    }
   }
 
   fun readU16List(file: File): MutableList<Int> {
@@ -279,12 +290,14 @@ class DecompProject(
     file.writeBytes(buf.array())
   }
 
-  /** Saves map and layout changes. */
+/** Saves map and layout changes. */
   fun save(map: EditorMap) {
     saveLayout(map)
     val mapJsonFile = File(rootDir, "data/maps/${map.dirName}/map.json")
     mapJsonFile.writeText(map.toJsonString())
     writeLayoutsJson()
+    layoutBlockCache.remove(map.layout.name)
+    editorMapCache[map.dirName] = map
   }
 
   fun saveLayoutsJson() = writeLayoutsJson()
@@ -477,10 +490,18 @@ class DecompProject(
     file.writeText(JsonWriter.writePretty(root) + "\n")
   }
 
-  /** Reloads indexes after creating maps or layouts. */
+/** Reloads indexes after creating maps or layouts. */
   fun refresh() {
+    clearCaches()
     readMapGroups()
     readLayouts()
+  }
+
+  /** Invalidates all cached data. Call after structural changes. */
+  fun clearCaches() {
+    mapIdCache.clear()
+    editorMapCache.clear()
+    layoutBlockCache.clear()
   }
 
   /** Creates missing map groups through [groupIndex]. */

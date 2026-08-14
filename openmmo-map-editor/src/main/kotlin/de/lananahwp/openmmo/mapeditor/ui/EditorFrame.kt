@@ -14,11 +14,14 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
+import java.awt.event.InputEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.awt.image.BufferedImage
 import java.io.File
+import javax.imageio.ImageIO
 import javax.swing.BorderFactory
 import javax.swing.ButtonGroup
 import javax.swing.JButton
@@ -52,6 +55,8 @@ import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
+import kotlin.math.ceil
+import kotlin.math.sqrt
 
 /** A loaded decomp project together with its renderer/exporter. */
 private class ProjectHolder(val project: DecompProject) {
@@ -71,11 +76,14 @@ private enum class EditMode {
   ELEVATION,
   WARP,
   EVENTS,
+  FILL,
 }
 
 private data class TileEdit(val x: Int, val y: Int, val before: Int, val after: Int)
 
 private data class CopiedEvent(val type: MapEventType, val event: Json.JObj)
+
+private data class CopiedEvents(val type: MapEventType, val events: List<Json.JObj>)
 
 /** Main map editor window. */
 class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
@@ -83,6 +91,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val holders = LinkedHashMap<String, ProjectHolder>()
   private val allMaps = mutableListOf<MapRef>()
   private val rootNode = DefaultMutableTreeNode("Projects")
+  private var recentList = mutableListOf<String>()
+  private lateinit var recentMenu: JMenu
   private var currentHolder: ProjectHolder? = null
   private var currentMap: EditorMap? = null
   private var currentRef: MapRef? = null
@@ -95,12 +105,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var activeBrush = MetatileBrush.single(0)
   private val undoStack = ArrayDeque<List<TileEdit>>()
   private val redoStack = ArrayDeque<List<TileEdit>>()
+  private val snapshotUndoStack = ArrayDeque<Pair<String, String>>()
+  private val snapshotRedoStack = ArrayDeque<Pair<String, String>>()
   private var copiedEvent: CopiedEvent? = null
+  private var copiedEvents: CopiedEvents? = null
+  private val selectedEventMarkers = mutableSetOf<MapEventMarker>()
 
   private val collisionPaint = JCheckBox("Paint collision")
   private val elevationPaint = JCheckBox("Paint elevation")
   private val warpPaint = JCheckBox("Place warp")
   private val eventOverlayPaint = JCheckBox("Events")
+  private val floodFillPaint = JCheckBox("Flood fill")
+  private val playerViewCheck = JCheckBox("Player view")
 
   private val tree = JTree().apply {
     selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
@@ -117,6 +133,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           { x, y -> pickBlock(x, y) },
           { marker, x, y -> moveEvent(marker, x, y) },
           { marker, x, y, px, py -> showEventContextMenu(marker, x, y, px, py) },
+          { marker, mods -> selectEvent(marker, mods) },
       )
   private val zoomLabel = JLabel("100%")
   private val status = JLabel("Open a decomp (File -> Open Decomp)")
@@ -138,6 +155,23 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     size = Dimension(1400, 860)
     setLocationRelativeTo(null)
 
+    // Restore window geometry.
+    val config = loadConfig()
+    config?.arr("windowSize")?.let { arr ->
+      if (arr.items.size == 2) {
+        val w = arr.items[0].asInt() ?: 1400
+        val h = arr.items[1].asInt() ?: 860
+        size = Dimension(w, h)
+      }
+    }
+    config?.arr("windowPos")?.let { arr ->
+      if (arr.items.size == 2) {
+        val x = arr.items[0].asInt()
+        val y = arr.items[1].asInt()
+        if (x != null && y != null) setLocation(x, y)
+      }
+    }
+
     jMenuBar = buildMenuBar()
     contentPane.add(buildToolBar(), BorderLayout.NORTH)
     canvas.onZoomChanged = { updateZoomLabel() }
@@ -145,7 +179,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     addWindowListener(
         object : WindowAdapter() {
           override fun windowClosing(e: WindowEvent) {
-            if (confirmMapChange()) dispose()
+            if (confirmMapChange()) {
+              persistWindowGeometry()
+              dispose()
+            }
           }
         })
 
@@ -251,6 +288,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         elevationPaint.isSelected = false
         warpPaint.isSelected = false
         eventOverlayPaint.isSelected = false
+        floodFillPaint.isSelected = false
         editMode = EditMode.COLLISION
         overlay = RenderOverlay.Collision
       } else {
@@ -265,6 +303,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         collisionPaint.isSelected = false
         warpPaint.isSelected = false
         eventOverlayPaint.isSelected = false
+        floodFillPaint.isSelected = false
         editMode = EditMode.ELEVATION
         overlay = RenderOverlay.Elevation
       } else {
@@ -279,6 +318,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         collisionPaint.isSelected = false
         elevationPaint.isSelected = false
         eventOverlayPaint.isSelected = false
+        floodFillPaint.isSelected = false
         editMode = EditMode.WARP
         if (overlay != RenderOverlay.None) {
           overlay = RenderOverlay.None
@@ -294,7 +334,24 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         collisionPaint.isSelected = false
         elevationPaint.isSelected = false
         warpPaint.isSelected = false
+        floodFillPaint.isSelected = false
         editMode = EditMode.EVENTS
+        if (overlay != RenderOverlay.None) {
+          overlay = RenderOverlay.None
+          refreshMapImage()
+        }
+      } else {
+        editMode = EditMode.TILE
+      }
+      updateEventOverlayVisibility()
+    }
+    floodFillPaint.addActionListener {
+      if (floodFillPaint.isSelected) {
+        collisionPaint.isSelected = false
+        elevationPaint.isSelected = false
+        warpPaint.isSelected = false
+        eventOverlayPaint.isSelected = false
+        editMode = EditMode.FILL
         if (overlay != RenderOverlay.None) {
           overlay = RenderOverlay.None
           refreshMapImage()
@@ -308,6 +365,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       canvas.showGrid = grid.isSelected
       canvas.repaint()
     }
+    playerViewCheck.addActionListener {
+      canvas.showPlayerView = playerViewCheck.isSelected
+      canvas.repaint()
+    }
     val dimensions = JButton("Change Dimensions…")
     dimensions.addActionListener { changeDimensions() }
 
@@ -319,7 +380,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     mapToolbar.add(elevationSpinner)
     mapToolbar.add(warpPaint)
     mapToolbar.add(eventOverlayPaint)
+    mapToolbar.add(floodFillPaint)
     mapToolbar.add(grid)
+    mapToolbar.add(playerViewCheck)
     mapToolbar.add(dimensions)
     panel.add(mapToolbar, BorderLayout.NORTH)
 
@@ -337,8 +400,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun buildMenuBar(): JMenuBar {
     val bar = JMenuBar()
 
+    val config = loadConfig()
+    config?.arr("recentProjects")?.items?.mapNotNull { it.asStr() }?.let { recentList = it.toMutableList() }
+
     val file = JMenu("File")
     file.add(JMenuItem("Open Decomp…").apply { addActionListener { chooseProject() } })
+    recentMenu = JMenu("Open Recent")
+    fun rebuildRecent() {
+      recentMenu.removeAll()
+      for (path in recentList.take(10)) {
+        recentMenu.add(JMenuItem(path).apply {
+          addActionListener {
+            val dir = File(path)
+            if (dir.isDirectory) addProject(dir)?.let { selectFirstMap(it) }
+            else JOptionPane.showMessageDialog(
+                this@EditorFrame, "Decomp not found at $path", "Open Recent", JOptionPane.WARNING_MESSAGE)
+          }
+        })
+      }
+      recentMenu.isEnabled = recentList.isNotEmpty()
+    }
+    rebuildRecent()
+    file.add(recentMenu)
     file.add(JMenuItem("New Map…").apply { addActionListener { newMap() } })
     file.add(
         JMenuItem("Duplicate as Runtime Override…").apply {
@@ -352,6 +435,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     file.addSeparator()
     file.add(JMenuItem("Export Runtime Map…").apply { addActionListener { exportCurrent() } })
     file.add(JMenuItem("Export All Runtime Maps…").apply { addActionListener { exportAll() } })
+    file.addSeparator()
+    file.add(JMenuItem("Export Map Image…").apply { addActionListener { exportImage() } })
     bar.add(file)
 
     val edit = JMenu("Edit")
@@ -464,6 +549,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val holder = ProjectHolder(project)
       holders[root.path] = holder
       rebuildAllProjects()
+      rememberRecentProject(root.path)
       status.text = "Opened $root"
       return holder
     } catch (t: Throwable) {
@@ -662,6 +748,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     currentRef = ref
     undoStack.clear()
     redoStack.clear()
+    snapshotUndoStack.clear()
+    snapshotRedoStack.clear()
+    selectedEventMarkers.clear()
+    syncSelectedEvents()
     canvas.blockWidth = map.layout.width
     canvas.blockHeight = map.layout.height
 
@@ -756,6 +846,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     elevationPaint.isSelected = mode == EditMode.ELEVATION
     warpPaint.isSelected = mode == EditMode.WARP
     eventOverlayPaint.isSelected = mode == EditMode.EVENTS
+    floodFillPaint.isSelected = mode == EditMode.FILL
     updateEventOverlayVisibility()
   }
 
@@ -776,6 +867,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   private fun applyHeader(width: Int, height: Int, primary: String, secondary: String) {
     val map = currentMap ?: return
+    snapshotForUndo()
     map.layout.resize(width, height, canvas.brush)
     map.layout.primaryTileset = primary
     map.layout.secondaryTileset = secondary
@@ -823,6 +915,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     val map = currentMap ?: return
     val holder = currentHolder ?: return
+    if (editMode == EditMode.FILL) {
+      floodFill(x, y, brushValue)
+      return
+    }
     if (editMode == EditMode.TILE && paintBrush(x, y)) return
     val i = y * map.layout.width + x
     if (i !in map.layout.blocks.indices) return
@@ -853,6 +949,53 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         }
   }
 
+  private fun floodFill(startX: Int, startY: Int, brushValue: Int) {
+    val map = currentMap ?: return
+    val holder = currentHolder ?: return
+    val w = map.layout.width
+    val h = map.layout.height
+    val startIndex = startY * w + startX
+    if (startIndex !in map.layout.blocks.indices) return
+    val target = map.layout.blocks[startIndex]
+    val replacement = (target and 0xFC00) or (brushValue and 0x3FF)
+    if (replacement == target) return
+    val edits = mutableListOf<TileEdit>()
+    val updates = mutableListOf<Triple<Int, Int, BufferedImage>>()
+    val visited = HashSet<Int>()
+    val queue = ArrayDeque<Int>()
+    queue.addLast(startIndex)
+    visited.add(startIndex)
+    while (queue.isNotEmpty()) {
+      val idx = queue.removeFirst()
+      val cx = idx % w
+      val cy = idx / w
+      val cur = map.layout.blocks[idx]
+      if ((cur and 0x3FF) != (target and 0x3FF)) continue
+      map.layout.blocks[idx] = replacement
+      edits += TileEdit(cx, cy, cur, replacement)
+      updates += Triple(cx, cy,
+          holder.renderer.blockImage(map.layout.primaryTileset, map.layout.secondaryTileset, replacement, overlay))
+      for ((dx, dy) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
+        val nx = cx + dx
+        val ny = cy + dy
+        if (nx in 0 until w && ny in 0 until h) {
+          val ni = ny * w + nx
+          if (ni !in visited && ni in map.layout.blocks.indices) {
+            visited.add(ni)
+            queue.addLast(ni)
+          }
+        }
+      }
+    }
+    if (edits.isEmpty()) return
+    canvas.updateBlocks(updates)
+    undoStack.addLast(edits)
+    redoStack.clear()
+    markDirty()
+    canvas.brush = brushValue
+    status.text = "Flood filled ${edits.size} blocks"
+  }
+
   private fun paintBrush(anchorX: Int, anchorY: Int): Boolean {
     val map = currentMap ?: return false
     val holder = currentHolder ?: return false
@@ -860,6 +1003,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       return false
     }
     val edits = mutableListOf<TileEdit>()
+    val updates = mutableListOf<Triple<Int, Int, BufferedImage>>()
     for (dy in 0 until activeBrush.height) {
       for (dx in 0 until activeBrush.width) {
         val x = anchorX + dx
@@ -875,9 +1019,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         if (replacement == current) continue
         map.layout.blocks[index] = replacement
         edits += TileEdit(x, y, current, replacement)
-        canvas.updateBlock(
-            x,
-            y,
+        updates += Triple(
+            x, y,
             holder.renderer.blockImage(
                 map.layout.primaryTileset,
                 map.layout.secondaryTileset,
@@ -888,6 +1031,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
     }
     if (edits.isEmpty()) return true
+    canvas.updateBlocks(updates)
     undoStack.addLast(edits)
     redoStack.clear()
     markDirty()
@@ -902,22 +1046,61 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     selector?.selectMetatile(metatile)
     activeBrush = MetatileBrush.single(metatile)
     canvas.brush = metatile
+    if (editMode == EditMode.FILL) return
     selectEditMode(EditMode.TILE)
     status.text = "Picked 0x%03X at (%d, %d)".format(metatile, x, y)
   }
 
   private fun undo() {
-    val edits = undoStack.removeLastOrNull() ?: return
-    for (edit in edits.asReversed()) applyTileEdit(edit.x, edit.y, edit.before)
-    redoStack.addLast(edits)
-    status.text = "Undid ${edits.size} tile edit(s)"
+    val map = currentMap ?: return
+    if (undoStack.isNotEmpty()) {
+      val edits = undoStack.removeLast()
+      for (edit in edits.asReversed()) applyTileEdit(edit.x, edit.y, edit.before)
+      redoStack.addLast(edits)
+      status.text = "Undid ${edits.size} tile edit(s)"
+      return
+    }
+    if (snapshotUndoStack.isNotEmpty()) {
+      val snapshot = snapshotUndoStack.removeLast()
+      snapshotRedoStack.addLast(map.dirName to JsonWriter.write(map.mapJson))
+      restoreMapSnapshot(map, snapshot.second)
+      status.text = "Undid event/header edit"
+      return
+    }
   }
 
   private fun redo() {
-    val edits = redoStack.removeLastOrNull() ?: return
-    for (edit in edits) applyTileEdit(edit.x, edit.y, edit.after)
-    undoStack.addLast(edits)
-    status.text = "Redid ${edits.size} tile edit(s)"
+    val map = currentMap ?: return
+    if (redoStack.isNotEmpty()) {
+      val edits = redoStack.removeLast()
+      for (edit in edits) applyTileEdit(edit.x, edit.y, edit.after)
+      undoStack.addLast(edits)
+      status.text = "Redid ${edits.size} tile edit(s)"
+      return
+    }
+    if (snapshotRedoStack.isNotEmpty()) {
+      val snapshot = snapshotRedoStack.removeLast()
+      snapshotUndoStack.addLast(map.dirName to JsonWriter.write(map.mapJson))
+      restoreMapSnapshot(map, snapshot.second)
+      status.text = "Redid event/header edit"
+      return
+    }
+  }
+
+  private fun snapshotForUndo() {
+    val map = currentMap ?: return
+    snapshotUndoStack.addLast(map.dirName to JsonWriter.write(map.mapJson))
+    snapshotRedoStack.clear()
+  }
+
+  private fun restoreMapSnapshot(map: EditorMap, jsonText: String) {
+    val restored = JsonParser.parse(jsonText).asObj() ?: return
+    map.mapJson.entries.clear()
+    map.mapJson.entries.putAll(restored.entries)
+    markDirty()
+    eventsPanel.setMap(map)
+    headerPanel?.setMap(map)
+    refreshEventOverlay()
   }
 
   private fun applyTileEdit(x: Int, y: Int, value: Int) {
@@ -941,6 +1124,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   private fun addWarp(x: Int, y: Int, elev: Int) {
     val map = currentMap ?: return
+    snapshotForUndo()
     val entry =
         Json.JObj(
             linkedMapOf(
@@ -984,6 +1168,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   private fun removeWarp(idx: Int) {
     val map = currentMap ?: return
+    snapshotForUndo()
     val a = map.mapJson.arr("warp_events") ?: return
     val items = a.items.toMutableList()
     if (idx !in items.indices) return
@@ -1058,6 +1243,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             JOptionPane.OK_CANCEL_OPTION,
         )
     if (result != JOptionPane.OK_OPTION) return
+    snapshotForUndo()
     for ((key, numeric) in fields) {
       val value = editors.getValue(key).text.trim()
       if (numeric) {
@@ -1107,6 +1293,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val map = currentMap ?: return
     val event = eventFor(map, marker) ?: return
     if (event.int("x") == x && event.int("y") == y) return
+    snapshotForUndo()
     event.entries["x"] = Json.JNum(x.toDouble())
     event.entries["y"] = Json.JNum(y.toDouble())
     markDirty()
@@ -1122,14 +1309,32 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       px: Int,
       py: Int,
   ) {
+    if (marker != null && marker !in selectedEventMarkers) {
+      selectedEventMarkers.clear()
+      selectedEventMarkers.add(marker)
+      syncSelectedEvents()
+    }
     val menu = JPopupMenu()
     if (marker == null) {
-      val item = JMenuItem("Paste Event")
-      item.isEnabled = copiedEvent != null
-      item.addActionListener { pasteEvent(x, y) }
-      menu.add(item)
+      if (selectedEventMarkers.isEmpty()) {
+        val item = JMenuItem("Paste Event")
+        item.isEnabled = copiedEvent != null || copiedEvents != null
+        item.addActionListener { pasteEvent(x, y) }
+        menu.add(item)
+      } else {
+        menu.add(JMenuItem("Delete Selected").apply {
+          addActionListener { deleteSelectedEvents() }
+        })
+        menu.add(JMenuItem("Clear Selection").apply {
+          addActionListener { clearEventSelection() }
+        })
+      }
     } else {
-      menu.add(JMenuItem("Copy Event").apply { addActionListener { copyEvent(marker) } })
+      menu.add(JMenuItem("Copy Event").apply { addActionListener { copySelectedEvents(marker) } })
+      menu.add(JMenuItem("Copy Selected").apply {
+        addActionListener { copySelectedEvents(marker) }
+      })
+      menu.add(JMenuItem("Delete Selected").apply { addActionListener { deleteSelectedEvents() } })
       if (marker.type == MapEventType.WARP) {
         menu.add(
             JMenuItem("Go to Connected Map").apply {
@@ -1140,16 +1345,94 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     menu.show(canvas, px, py)
   }
 
-  private fun copyEvent(marker: MapEventMarker) {
+  private fun selectEvent(marker: MapEventMarker?, modifiers: Int) {
+    val ctrl = modifiers and (InputEvent.CTRL_DOWN_MASK or InputEvent.META_DOWN_MASK) != 0
+    when {
+      marker == null -> {
+        if (!ctrl) selectedEventMarkers.clear()
+        syncSelectedEvents()
+      }
+      ctrl -> {
+        if (!selectedEventMarkers.remove(marker)) selectedEventMarkers.add(marker)
+        syncSelectedEvents()
+      }
+      else -> {
+        if (selectedEventMarkers.size <= 1 && selectedEventMarkers.contains(marker)) return
+        selectedEventMarkers.clear()
+        selectedEventMarkers.add(marker)
+        syncSelectedEvents()
+      }
+    }
+  }
+
+  private fun syncSelectedEvents() {
+    canvas.selectedEventMarkers = selectedEventMarkers.toSet()
+  }
+
+  private fun copySelectedEvents(marker: MapEventMarker) {
     val map = currentMap ?: return
-    val event = eventFor(map, marker) ?: return
-    val copy = JsonParser.parse(JsonWriter.write(event)).asObj() ?: return
-    copiedEvent = CopiedEvent(marker.type, copy)
-    status.text = "Copied ${marker.type.name.lowercase()} event ${marker.index}"
+    val events =
+        selectedEventMarkers.mapNotNull { eventFor(map, it) }
+            .ifEmpty { listOfNotNull(eventFor(map, marker)) }
+    if (events.isEmpty()) return
+    val copies =
+        events.map {
+          JsonParser.parse(JsonWriter.write(it)).asObj() ?: return
+        }
+    copiedEvent = CopiedEvent(marker.type, copies.first())
+    copiedEvents = CopiedEvents(marker.type, copies)
+    status.text = "Copied ${copies.size} ${marker.type.name.lowercase()} event(s)"
+  }
+
+  private fun deleteSelectedEvents() {
+    val map = currentMap ?: return
+    if (selectedEventMarkers.isEmpty()) return
+    snapshotForUndo()
+    val byType = selectedEventMarkers.groupBy { it.type }
+    for ((type, markers) in byType) {
+      val key = eventArrayKey(type)
+      val indices = markers.map { it.index }.toSet()
+      val remaining =
+          map.mapJson.arr(key)?.items.orEmpty()
+              .filterIndexed { i, _ -> i !in indices }
+      map.mapJson.entries[key] = Json.JArr(remaining)
+    }
+    selectedEventMarkers.clear()
+    syncSelectedEvents()
+    markDirty()
+    eventsPanel.setMap(map)
+    refreshEventOverlay()
+    status.text = "Deleted ${byType.values.sumOf { it.size }} event(s)"
+  }
+
+  private fun clearEventSelection() {
+    selectedEventMarkers.clear()
+    syncSelectedEvents()
   }
 
   private fun pasteEvent(x: Int, y: Int) {
     val map = currentMap ?: return
+    snapshotForUndo()
+    val batch = copiedEvents
+    if (batch != null) {
+      val copies =
+          batch.events.map {
+            JsonParser.parse(JsonWriter.write(it)).asObj() ?: return
+          }
+      val key = eventArrayKey(batch.type)
+      val items = map.mapJson.arr(key)?.items.orEmpty()
+      val cols = ceil(sqrt(copies.size.toDouble())).toInt().coerceAtLeast(1)
+      copies.forEachIndexed { i, c ->
+        c.entries["x"] = Json.JNum((x + i % cols).toDouble())
+        c.entries["y"] = Json.JNum((y + i / cols).toDouble())
+      }
+      map.mapJson.entries[key] = Json.JArr(items + copies)
+      markDirty()
+      eventsPanel.setMap(map)
+      refreshEventOverlay()
+      status.text = "Pasted ${copies.size} ${batch.type.name.lowercase()} event(s) at ($x, $y)"
+      return
+    }
     val copied = copiedEvent ?: return
     val event = JsonParser.parse(JsonWriter.write(copied.event)).asObj() ?: return
     event.entries["x"] = Json.JNum(x.toDouble())
@@ -1213,6 +1496,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val dialog = ConnectWarpDialog(idx, map, allDirs, holder.project::readMapJson)
     dialog.isVisible = true
     val r = dialog.result ?: return
+    snapshotForUndo()
     val srcWarp = map.warps[idx]
     srcWarp.entries["dest_map"] = Json.JStr(r.destMapId)
     srcWarp.entries["dest_warp_id"] = Json.JStr(r.destWarpIdx.toString())
@@ -1240,6 +1524,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun hoverBlock(x: Int, y: Int) {
+    canvas.hoveredBlock = x to y
     val map = currentMap ?: return
     val block = map.layout.tileAt(x, y) ?: return
     val mid = block and 0x3FF
@@ -1304,6 +1589,26 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
+  private fun exportImage() {
+    val map = currentMap ?: return
+    val holder = currentHolder ?: return
+    val chooser = JFileChooser().apply {
+      dialogTitle = "Save map image"
+      selectedFile = File("${map.dirName}.png")
+      fileSelectionMode = JFileChooser.FILES_ONLY
+    }
+    if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return
+    try {
+      val img = holder.renderer.renderMap(map.layout, overlay)
+      ImageIO.write(img, "png", chooser.selectedFile)
+      JOptionPane.showMessageDialog(
+          this, "Wrote ${chooser.selectedFile.absolutePath}", "Export Image", JOptionPane.INFORMATION_MESSAGE)
+    } catch (t: Throwable) {
+      JOptionPane.showMessageDialog(
+          this, t.message ?: t.toString(), "Export failed", JOptionPane.ERROR_MESSAGE)
+    }
+  }
+
   private fun chooseExportDir(): File? {
     val chooser = JFileChooser().apply {
       dialogTitle = "Choose export directory"
@@ -1312,10 +1617,40 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     return if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
   }
 
+  private fun rememberRecentProject(path: String) {
+    recentList.remove(path)
+    recentList.add(0, path)
+    val obj = loadConfig() ?: Json.JObj(linkedMapOf())
+    obj.entries["recentProjects"] = Json.JArr(recentList.take(10).map { Json.JStr(it) })
+    saveConfig(obj)
+  }
+
+  private fun persistWindowGeometry() {
+    val obj = loadConfig() ?: Json.JObj(linkedMapOf())
+    obj.entries["windowSize"] = Json.JArr(listOf(Json.JNum(width.toDouble()), Json.JNum(height.toDouble())))
+    obj.entries["windowPos"] = Json.JArr(listOf(Json.JNum(x.toDouble()), Json.JNum(y.toDouble())))
+    saveConfig(obj)
+  }
+
   companion object {
+    private const val CONFIG_FILE = ".openmmo-map-editor.json"
+
     @JvmStatic
     fun show(dirs: List<File>) {
       SwingUtilities.invokeLater { EditorFrame(dirs).isVisible = true }
+    }
+
+    private fun configFile(): File =
+        File(System.getProperty("user.home"), CONFIG_FILE)
+
+    private fun loadConfig(): Json.JObj? {
+      val f = configFile()
+      if (!f.isFile) return null
+      return try { JsonParser.parse(f.readText()).asObj() } catch (_: Exception) { null }
+    }
+
+    private fun saveConfig(obj: Json.JObj) {
+      try { configFile().writeText(JsonWriter.writePretty(obj)) } catch (_: Exception) {}
     }
   }
 }
