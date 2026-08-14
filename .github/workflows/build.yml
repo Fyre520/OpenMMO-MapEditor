@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: openmmo-map-editor
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build
+        run: bash ./gradlew build --no-daemon --stacktrace
+
+      - name: Run smoke test
+        run: xvfb-run -a bash ./gradlew smokeTest --no-daemon --stacktrace
+
+      - name: Upload runnable JAR
+        uses: actions/upload-artifact@v7
+        with:
+          name: openmmo-map-editor-${{ github.sha }}
+          path: openmmo-map-editor/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 14

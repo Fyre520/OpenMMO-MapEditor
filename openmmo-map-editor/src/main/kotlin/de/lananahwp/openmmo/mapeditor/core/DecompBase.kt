@@ -21,15 +21,18 @@ class DecompBase(private val rootDir: File) : RegionSource {
           if (attrWidth == 4) 0x1FF else 0xFF,
       )
 
+  private val tilesetHeaders: Map<String, Boolean> by lazy {
+    MetatileBehaviorsFiles.readTilesetHeaders(rootDir)
+  }
+
   override val tilesetNames: List<String> =
-      MetatileBehaviorsFiles.readTilesetHeaders(rootDir)
-          .let { headers ->
-            headers.filter { !it.value }.map { it.key } +
-                headers.filter { it.value }.map { it.key }
-          }
+      tilesetHeaders.let { headers ->
+        headers.filter { !it.value }.map { it.key } +
+            headers.filter { it.value }.map { it.key }
+      }
 
   override fun isSecondaryTileset(name: String): Boolean =
-      MetatileBehaviorsFiles.readTilesetHeaders(rootDir)[name] ?: false
+      tilesetHeaders[name] ?: false
 
   override val numPalettesPrimary: Int =
       MetatileBehaviorsFiles.readNumber(File(rootDir, "include/fieldmap.h"), "NUM_PALS_IN_PRIMARY", 6)
@@ -44,6 +47,9 @@ class DecompBase(private val rootDir: File) : RegionSource {
   private val metatileCache = HashMap<String, IntArray>()
   private val attributeCache = HashMap<String, LongArray>()
   private val pixelsCache = HashMap<String, Array<ByteArray>>()
+  private val paletteCache = HashMap<String, IntArray>()
+  private val behaviorOrdinalsCache = HashMap<String, IntArray>()
+  private val symbolIncbinsCache = HashMap<String, String?>()
 
   /** gTileset_X -> (gMetatiles_X symbol, gMetatileAttributes_X symbol) from headers.h. */
   private val tilesetSymbols: Map<String, Pair<String, String>> by lazy {
@@ -63,7 +69,7 @@ class DecompBase(private val rootDir: File) : RegionSource {
   override fun metatileTiles(name: String): IntArray =
       metatileCache.getOrPut(name) {
         val path =
-            MetatileBehaviorsFiles.readSymbolIncbins(rootDir, metatilesSymbol(name))
+            readSymbolIncbinsCached(name)
                 ?: return@getOrPut IntArray(0)
         val file = File(rootDir, path)
         if (!file.exists()) IntArray(0)
@@ -93,19 +99,26 @@ class DecompBase(private val rootDir: File) : RegionSource {
       }
 
   override fun behaviorOrdinals(name: String): IntArray =
-      metatileAttributes(name).map { behaviorTable.behaviorOf(it).ordinal }.toIntArray()
+      behaviorOrdinalsCache.getOrPut(name) {
+        metatileAttributes(name).map { behaviorTable.behaviorOf(it).ordinal }.toIntArray()
+      }
 
   override fun tilePixels(name: String, tileId: Int): ByteArray =
       pixels(name).getOrNull(tileId) ?: ByteArray(64)
 
   override fun paletteColors(name: String, paletteId: Int): IntArray {
-    val dir = tilesetDir(name)
-    val file = File(dir, "palettes/${paletteId.toString().padStart(2, '0')}.pal")
-    if (!file.exists()) return INVALID_PALETTE.copyOf()
-    val colors = JascPal.parse(file)
-    val out = IntArray(16)
-    for (i in 0 until 16) out[i] = colors.getOrElse(i) { INVALID_COLOR }
-    return out
+    val key = "$name/$paletteId"
+    return paletteCache.getOrPut(key) {
+      val dir = tilesetDir(name)
+      val file = File(dir, "palettes/${paletteId.toString().padStart(2, '0')}.pal")
+      if (!file.exists()) INVALID_PALETTE.copyOf()
+      else {
+        val colors = JascPal.parse(file)
+        val out = IntArray(16)
+        for (i in 0 until 16) out[i] = colors.getOrElse(i) { INVALID_COLOR }
+        out
+      }
+    }
   }
 
   private fun pixels(name: String): Array<ByteArray> =
@@ -138,9 +151,16 @@ class DecompBase(private val rootDir: File) : RegionSource {
       }
 
   private fun tilesetDir(name: String): File {
-    val path = MetatileBehaviorsFiles.readSymbolIncbins(rootDir, metatilesSymbol(name))
+    val path = readSymbolIncbinsCached(name)
     val base = path?.substringBeforeLast('/') ?: return rootDir
     return File(rootDir, base)
+  }
+
+  private fun readSymbolIncbinsCached(name: String): String? {
+    val sym = metatilesSymbol(name)
+    return symbolIncbinsCache.getOrPut(sym) {
+      MetatileBehaviorsFiles.readSymbolIncbins(rootDir, sym)
+    }
   }
 
   companion object {
@@ -191,15 +211,16 @@ object MetatileBehaviorsFiles {
     return re.findAll(file.readText()).firstOrNull()?.groupValues?.get(1)?.let { if (it == "32") 4 else 2 } ?: 2
   }
 
-  fun readBehaviorIds(file: File): Map<String, Int> {
+    fun readBehaviorIds(file: File): Map<String, Int> {
     if (!file.exists()) return emptyMap()
     val out = LinkedHashMap<String, Int>()
+    val text = file.readText()
     val defineRe = Regex("""#define\s+(MB_\w+)\s+(0x[0-9A-Fa-f]+|\d+)""")
-    for (m in defineRe.findAll(file.readText())) out[m.groupValues[1]] = parseInt(m.groupValues[2])
+    for (m in defineRe.findAll(text)) out[m.groupValues[1]] = parseInt(m.groupValues[2])
     val entryRe = Regex("""^(MB_\w+)\s*(?:=\s*(0x[0-9A-Fa-f]+|\d+))?""")
     var next = 0
     var inEnum = false
-    for (raw in file.readLines()) {
+    for (raw in text.lineSequence()) {
       val line = raw.trim()
       if (line.startsWith("enum")) { inEnum = true; continue }
       if (!inEnum) continue
