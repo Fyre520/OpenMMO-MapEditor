@@ -611,6 +611,10 @@ fun main(args: Array<String>) {
   // 12. Targeted texture diagnosis for Oreburgh.
   run {
     val ore = NdsProject(File("../decomp/pokeplatinum"))
+    if (!ore.hasRom) {
+      println("No local Platinum ROM; targeted ROM diagnostics skipped")
+      return@run
+    }
     if (!ore.hasMap("MAP_HEADER_OREBURGH_CITY")) return@run
     val m = ore.loadMap("MAP_HEADER_OREBURGH_CITY")!!
     println("Oreburgh areaDataArchiveID=${m.header.areaDataArchiveID} areaDataBank=${m.header.areaDataBank} matrixId=${m.header.matrixId}")
