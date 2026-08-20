@@ -35,6 +35,11 @@ class MapCanvas(
     private val onEventContextMenu:
         (marker: MapEventMarker?, x: Int, y: Int, px: Int, py: Int) -> Unit = { _, _, _, _, _ -> },
     private val onSelectEvent: (marker: MapEventMarker?, modifiers: Int) -> Unit = { _, _ -> },
+    private val onSelectRegion: (x1: Int, y1: Int, x2: Int, y2: Int) -> Unit = { _, _, _, _ -> },
+    private val onMoveSelection: (dx: Int, dy: Int) -> Unit = { _, _ -> },
+    private val onCopySelection: () -> Unit = {},
+    private val onPaste: () -> Unit = {},
+    private val onClearSelection: () -> Unit = {},
 ) : JPanel() {
 
   companion object {
@@ -124,23 +129,60 @@ class MapCanvas(
   var blockWidth = 0
   var blockHeight = 0
 
+  /** When true, left-drag selects/moves regions instead of painting. */
+  var selectionMode: Boolean = false
+    set(value) {
+      field = value
+      if (!value) cancelSelectionDrag()
+      repaint()
+    }
+
+  /** Selected region as [x1, y1, x2, y2] (inclusive, normalized block coords), or null. */
+  var selection: IntArray? = null
+    set(value) {
+      field = value
+      repaint()
+    }
+
   private var painting = false
   private val paintedBlocks = HashSet<Pair<Int, Int>>()
   private var draggedEvent: MapEventMarker? = null
   private var draggedEventTarget: Pair<Int, Int>? = null
+  private var selectAnchor: Pair<Int, Int>? = null
+  private var draggingSelect = false
+  private var draggingMove = false
+  private var moveStart: Pair<Int, Int>? = null
+  private var moveCurrent: Pair<Int, Int>? = null
 
   init {
+    isFocusable = true
     background = BACKGROUND_COLOR
     addMouseListener(
         object : MouseAdapter() {
 override fun mousePressed(e: MouseEvent) {
             if (e.button == MouseEvent.BUTTON1) {
+              requestFocusInWindow()
               if (eventEditingEnabled) {
                 val ev = eventAt(e.x, e.y)
                 draggedEvent = ev
                 draggedEventTarget = ev?.let { it.x to it.y }
                 onSelectEvent(ev, e.modifiersEx)
                 painting = false
+                return
+              }
+              if (selectionMode) {
+                val block = blockAt(e.x, e.y)
+                selectAnchor = block
+                moveStart = block
+                moveCurrent = block
+                painting = false
+                if (block != null && blockInsideSelection(block)) {
+                  draggingMove = true
+                  repaint()
+                } else {
+                  draggingSelect = true
+                  selection = block?.let { intArrayOf(it.first, it.second, it.first, it.second) }
+                }
                 return
               }
               painting = true
@@ -164,6 +206,23 @@ override fun mousePressed(e: MouseEvent) {
               onMoveEvent(marker, target.first, target.second)
             }
             cancelEventDrag()
+            if (draggingMove) {
+              val start = moveStart
+              val current = moveCurrent
+              if (start != null && current != null) {
+                val dx = current.first - start.first
+                val dy = current.second - start.second
+                if (dx != 0 || dy != 0) onMoveSelection(dx, dy)
+              }
+            }
+            if (draggingSelect) {
+              val a = selectAnchor
+              val sel = selection
+              if (a != null && sel != null) {
+                onSelectRegion(sel[0], sel[1], sel[2], sel[3])
+              }
+            }
+            cancelSelectionDrag()
             painting = false
             paintedBlocks.clear()
           }
@@ -179,6 +238,18 @@ override fun mousePressed(e: MouseEvent) {
                   repaint()
                 }
               }
+            } else if (draggingSelect) {
+              val a = selectAnchor ?: return
+              val b = blockAt(e.x, e.y) ?: return
+              selection =
+                  intArrayOf(
+                      minOf(a.first, b.first), minOf(a.second, b.second),
+                      maxOf(a.first, b.first), maxOf(a.second, b.second),
+                  )
+              repaint()
+            } else if (draggingMove) {
+              blockAt(e.x, e.y)?.let { moveCurrent = it }
+              repaint()
             } else if (painting) {
               paintAt(e.x, e.y)
             }
@@ -193,6 +264,35 @@ override fun mousePressed(e: MouseEvent) {
         zoom = if (e.wheelRotation < 0) zoom * 1.15 else zoom / 1.15
       }
     }
+    addKeyListener(
+        object : java.awt.event.KeyAdapter() {
+          override fun keyPressed(e: java.awt.event.KeyEvent) {
+            if (selectionMode && selection != null) {
+              when (e.keyCode) {
+                java.awt.event.KeyEvent.VK_C ->
+                    if (e.isControlDown) onCopySelection()
+                java.awt.event.KeyEvent.VK_V ->
+                    if (e.isControlDown) onPaste()
+                java.awt.event.KeyEvent.VK_DELETE, java.awt.event.KeyEvent.VK_BACK_SPACE ->
+                    onClearSelection()
+                java.awt.event.KeyEvent.VK_ESCAPE -> selection = null
+              }
+            }
+          }
+        })
+  }
+
+  private fun blockInsideSelection(block: Pair<Int, Int>): Boolean {
+    val sel = selection ?: return false
+    return block.first in sel[0]..sel[2] && block.second in sel[1]..sel[3]
+  }
+
+  private fun cancelSelectionDrag() {
+    draggingSelect = false
+    draggingMove = false
+    selectAnchor = null
+    moveStart = null
+    moveCurrent = null
   }
 
   private fun blockAt(px: Int, py: Int): Pair<Int, Int>? {
@@ -286,6 +386,26 @@ override fun mousePressed(e: MouseEvent) {
       }
     }
     if (showEventOverlay) drawEventOverlay(g2)
+    if (selectionMode) drawSelection(g2)
+  }
+
+  private fun drawSelection(g: Graphics2D) {
+    val sel = selection ?: return
+    val dx = moveCurrent?.first?.minus(moveStart?.first ?: 0) ?: 0
+    val dy = moveCurrent?.second?.minus(moveStart?.second ?: 0) ?: 0
+    val x0 = sel[0] + dx
+    val y0 = sel[1] + dy
+    val x1 = sel[2] + dx
+    val y1 = sel[3] + dy
+    val size = (16 * zoom).toInt().coerceAtLeast(1)
+    val px = (x0 * 16 * zoom).toInt()
+    val py = (y0 * 16 * zoom).toInt()
+    val pw = ((x1 - x0 + 1) * 16 * zoom).toInt()
+    val ph = ((y1 - y0 + 1) * 16 * zoom).toInt()
+    g.color = Color(90, 160, 255, 60)
+    g.fillRect(px, py, pw, ph)
+    g.color = Color(90, 160, 255)
+    g.drawRect(px, py, pw, ph)
   }
 
   private fun drawEventOverlay(g: Graphics2D) {

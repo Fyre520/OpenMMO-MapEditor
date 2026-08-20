@@ -7,12 +7,27 @@ repositories {
   mavenCentral()
 }
 
+dependencies {
+  implementation("org.jogamp.jogl:jogl-all:2.6.0")
+  implementation("org.jogamp.jogl:jogl-all:2.6.0:natives-windows-amd64")
+  implementation("org.jogamp.gluegen:gluegen-rt:2.6.0")
+  implementation("org.jogamp.gluegen:gluegen-rt:2.6.0:natives-windows-amd64")
+}
+
 kotlin {
   jvmToolchain(17)
 }
 
 application {
   mainClass.set("de.lananahwp.openmmo.mapeditor.MainKt")
+  applicationDefaultJvmArgs =
+      listOf(
+          "--add-exports=java.base/java.lang=ALL-UNNAMED",
+          "--add-exports=java.desktop/sun.awt=ALL-UNNAMED",
+          "--add-exports=java.desktop/sun.java2d=ALL-UNNAMED",
+          "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
+          "--add-opens=java.desktop/sun.java2d=ALL-UNNAMED",
+      )
 }
 
 tasks.jar {
@@ -25,4 +40,46 @@ tasks.register<JavaExec>("smokeTest") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.SmokeTestKt")
+}
+
+tasks.register<JavaExec>("glTest") {
+    dependsOn(tasks.classes)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("de.lananahwp.openmmo.mapeditor.GlTestKt")
+
+    jvmArgs(
+        "--add-exports=java.base/java.lang=ALL-UNNAMED",
+        "--add-exports=java.desktop/sun.awt=ALL-UNNAMED",
+        "--add-exports=java.desktop/sun.java2d=ALL-UNNAMED",
+        "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
+        "--add-opens=java.desktop/sun.java2d=ALL-UNNAMED"
+    )
+}
+
+tasks.register<JavaExec>("seamDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsSeamDiagnosticKt")
+  args(projectDir.parentFile.absolutePath)
+}
+
+tasks.register<JavaExec>("textureDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsTextureDiagnosticKt")
+  args(projectDir.parentFile.absolutePath)
+}
+
+tasks.register<JavaExec>("ndsEditingDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsEditingDiagnosticKt")
+  args(projectDir.parentFile.absolutePath)
+}
+
+tasks.register<JavaExec>("propCatalogSheets") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsPropCatalogGeneratorKt")
+  args(projectDir.parentFile.absolutePath, layout.buildDirectory.dir("prop-catalog").get().asFile.absolutePath)
 }

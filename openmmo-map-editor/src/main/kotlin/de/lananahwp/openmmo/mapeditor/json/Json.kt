@@ -13,11 +13,13 @@ sealed interface Json {
   fun asArr(): JArr? = this as? JArr
   fun asStr(): String? = (this as? JStr)?.value
   fun asInt(): Int? = (this as? JNum)?.value?.toInt()
+  fun asDouble(): Double? = (this as? JNum)?.value
   fun asBool(): Boolean? = (this as? JBool)?.value
 
   fun get(key: String): Json? = (this as? JObj)?.entries?.get(key)
   fun str(key: String): String? = get(key)?.asStr()
   fun int(key: String): Int? = get(key)?.asInt()
+  fun double(key: String): Double? = get(key)?.asDouble()
   fun arr(key: String): JArr? = get(key)?.asArr()
   fun obj(key: String): JObj? = get(key)?.asObj()
 }

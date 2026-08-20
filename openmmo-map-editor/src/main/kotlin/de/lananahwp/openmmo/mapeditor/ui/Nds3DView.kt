@@ -1,0 +1,205 @@
+package de.lananahwp.openmmo.mapeditor.ui
+
+import de.lananahwp.openmmo.mapeditor.core.NdsTexture
+import de.lananahwp.openmmo.mapeditor.core.NdsTri
+import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import java.awt.Component
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.math.tan
+
+/** What is under a viewport pointer: the ground-grid cell and, when applicable, a 3D model group. */
+data class NdsPointerHit(
+    val cellX: Int?,
+    val cellZ: Int?,
+    /** Closest editable model surface, either `prop:*` or a baked-terrain group. */
+    val modelGroup: String? = null,
+    /** Continuous map-space ground position; retained even outside the grid for uninterrupted dragging. */
+    val groundX: Float? = null,
+    val groundZ: Float? = null,
+)
+
+internal data class NdsPickRay(val origin: DoubleArray, val direction: DoubleArray)
+
+internal data class NdsScreenPickView(
+    val width: Int,
+    val height: Int,
+    val yaw: Double,
+    val pitch: Double,
+    val distance: Double,
+    val centerX: Double,
+    val centerZ: Double,
+    val modelScale: Float,
+    val modelCenterX: Float,
+    val modelCenterZ: Float,
+    val modelGroundY: Float,
+)
+
+/** Picks the visible projected triangle rather than projecting the pointer onto the ground. */
+internal fun pickNdsModelGroupAtScreen(
+    triangles: List<NdsTri>,
+    mouseX: Int,
+    mouseY: Int,
+    view: NdsScreenPickView,
+): String? {
+  val projector = NdsScreenProjector(view) ?: return null
+  var closestDepth = Double.POSITIVE_INFINITY
+  var selected: String? = null
+  for (tri in triangles) {
+    if (tri.editGroup.isEmpty()) continue
+    val a = projector.project(tri.ax, tri.ay, tri.az) ?: continue
+    val b = projector.project(tri.bx, tri.by, tri.bz) ?: continue
+    val c = projector.project(tri.cx, tri.cy, tri.cz) ?: continue
+    val denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+    if (abs(denominator) < 1e-7) continue
+    val px = mouseX.toDouble()
+    val py = mouseY.toDouble()
+    val u = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / denominator
+    val v = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / denominator
+    val w = 1.0 - u - v
+    if (u < -0.002 || v < -0.002 || w < -0.002) continue
+    val depth = u * a[2] + v * b[2] + w * c[2]
+    if (depth < closestDepth) {
+      closestDepth = depth
+      selected = tri.editGroup
+    }
+  }
+  return selected
+}
+
+internal fun projectNdsPoint(
+    view: NdsScreenPickView,
+    x: Float,
+    y: Float,
+    z: Float,
+): DoubleArray? {
+  return NdsScreenProjector(view)?.project(x, y, z)
+}
+
+private class NdsScreenProjector private constructor(private val view: NdsScreenPickView) {
+  private val eye: DoubleArray
+  private val forward: DoubleArray
+  private val right: DoubleArray
+  private val up: DoubleArray
+  private val aspect: Double
+  private val focal = 1.0 / tan(Math.toRadians(45.0) / 2.0)
+
+  init {
+    require(view.width > 0 && view.height > 0)
+    val yaw = Math.toRadians(view.yaw)
+    val pitch = Math.toRadians(view.pitch)
+    eye = doubleArrayOf(
+        view.centerX + view.distance * cos(pitch) * sin(yaw),
+        view.distance * sin(pitch),
+        view.centerZ - view.distance * cos(pitch) * cos(yaw),
+    )
+    forward = normalize3(doubleArrayOf(view.centerX - eye[0], -eye[1], view.centerZ - eye[2]))
+    right = normalize3(cross3(forward, doubleArrayOf(0.0, 1.0, 0.0)))
+    up = cross3(right, forward)
+    aspect = view.width.toDouble() / view.height
+  }
+
+  fun project(x: Float, y: Float, z: Float): DoubleArray? {
+    val worldX = 16.0 + (x - view.modelCenterX) * view.modelScale
+    val worldY = ((y - view.modelGroundY) * view.modelScale).toDouble()
+    val worldZ = 16.0 + (z - view.modelCenterZ) * view.modelScale
+    val relative = doubleArrayOf(worldX - eye[0], worldY - eye[1], worldZ - eye[2])
+    val vx = dot3(relative, right)
+    val vy = dot3(relative, up)
+    val depth = dot3(relative, forward)
+    if (depth < 1.0 || depth > 1000.0) return null
+    val sx = (((focal / aspect) * vx / depth) * 0.5 + 0.5) * view.width
+    val sy = (0.5 - (focal * vy / depth) * 0.5) * view.height
+    return doubleArrayOf(sx, sy, depth)
+  }
+
+  companion object {
+    operator fun invoke(view: NdsScreenPickView): NdsScreenProjector? =
+        if (view.width <= 0 || view.height <= 0) null else NdsScreenProjector(view)
+  }
+}
+
+/** Returns the closest editable model group intersected by [ray]. */
+internal fun pickNdsModelGroup(
+    triangles: List<NdsTri>,
+    ray: NdsPickRay,
+    groupPrefix: String,
+    excludedPrefix: String? = null,
+): String? {
+  var closest = Double.POSITIVE_INFINITY
+  var selected: String? = null
+  for (tri in triangles) {
+    if (!tri.editGroup.startsWith(groupPrefix) ||
+        (excludedPrefix != null && tri.editGroup.startsWith(excludedPrefix))) continue
+    val edge1 = doubleArrayOf(
+        (tri.bx - tri.ax).toDouble(),
+        (tri.by - tri.ay).toDouble(),
+        (tri.bz - tri.az).toDouble(),
+    )
+    val edge2 = doubleArrayOf(
+        (tri.cx - tri.ax).toDouble(),
+        (tri.cy - tri.ay).toDouble(),
+        (tri.cz - tri.az).toDouble(),
+    )
+    val p = cross3(ray.direction, edge2)
+    val determinant = dot3(edge1, p)
+    if (abs(determinant) < 1e-9) continue
+    val inverse = 1.0 / determinant
+    val fromA = doubleArrayOf(
+        ray.origin[0] - tri.ax,
+        ray.origin[1] - tri.ay,
+        ray.origin[2] - tri.az,
+    )
+    val u = dot3(fromA, p) * inverse
+    if (u < 0.0 || u > 1.0) continue
+    val q = cross3(fromA, edge1)
+    val v = dot3(ray.direction, q) * inverse
+    if (v < 0.0 || u + v > 1.0) continue
+    val distance = dot3(edge2, q) * inverse
+    if (distance > 1e-7 && distance < closest) {
+      closest = distance
+      selected = tri.editGroup
+    }
+  }
+  return selected
+}
+
+private fun cross3(a: DoubleArray, b: DoubleArray): DoubleArray =
+    doubleArrayOf(
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+private fun dot3(a: DoubleArray, b: DoubleArray): Double =
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+private fun normalize3(v: DoubleArray): DoubleArray {
+  val length = sqrt(dot3(v, v))
+  return if (length == 0.0) doubleArrayOf(0.0, 0.0, 0.0)
+  else doubleArrayOf(v[0] / length, v[1] / length, v[2] / length)
+}
+
+/**
+ * Common surface for the DS 3D map views (OpenGL and software fallback).
+ * Paint modes: 0 = tile, 1 = collision, 2 = permission, 3 = elevation.
+ */
+interface Nds3DView {
+  var grid: NdsGrid?
+  var modelTriangles: List<NdsTri>
+  var modelTextures: Map<String, NdsTexture>
+  var modelPalettes: Map<String, IntArray>
+  var modelOpacity: Float
+  var activeLayer: Int
+  var activeTile: Int
+  var activeHeight: Int
+  var brushCollision: Int
+  var showGrid: Boolean
+  var showCollision: Boolean
+  var markers: List<NdsEventMarker>
+  fun setPaintMode(mode: Int)
+
+  fun asComponent(): Component
+}

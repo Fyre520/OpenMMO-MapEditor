@@ -178,29 +178,37 @@ class NewMapDialog(private val project: DecompProject) : JDialog() {
     layoutFields.border = BorderFactory.createTitledBorder("New layout")
   }
 
+  /** Normalizes a user-entered constant to MAP_UPPER_SNAKE_CASE (adds MAP_ prefix, uppercases). */
+  private fun normalizeConstant(raw: String): String {
+    var s = raw.trim().uppercase()
+    s = s.replace(Regex("[^A-Z0-9_]+"), "_")
+    s = s.replace(Regex("_+"), "_").trim('_')
+    return if (s.startsWith("MAP_")) s else "MAP_$s"
+  }
+
   private fun deriveNames() {
-    val constant = mapConstantField.text.trim()
-    if (constant.isBlank()) return
-    val derived = constant.removePrefix("MAP_").removePrefix("map_")
+    val constant = normalizeConstant(mapConstantField.text)
+    if (constant == "MAP_" || constant == "MAP") return
+    val derived = constant.removePrefix("MAP_")
     if (dirNameField.text.isBlank() || dirNameField.text == "MyNewMap") {
       dirNameField.text = derived.ifBlank { "NewMap" }
     }
     if (nameField.text.isBlank() || nameField.text == "My New Map") {
-      nameField.text = derived.replace('_', ' ')
+      nameField.text = derived.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
     }
   }
 
   private fun onOk() {
-    val constant = mapConstantField.text.trim()
+    val constant = normalizeConstant(mapConstantField.text)
     val dirName = dirNameField.text.trim()
-    if (constant.isEmpty() || dirName.isEmpty()) {
+    if (constant == "MAP" || constant == "MAP_" || dirName.isEmpty()) {
       JOptionPane.showMessageDialog(this, "Map constant and directory name are required.", "New Map", JOptionPane.WARNING_MESSAGE)
       return
     }
     if (!constant.matches(Regex("MAP_[A-Z0-9_]+"))) {
       JOptionPane.showMessageDialog(
           this,
-          "Map constants must use MAP_UPPER_SNAKE_CASE.",
+          "Map constants may only contain letters, numbers, and underscores.",
           "New Map",
           JOptionPane.WARNING_MESSAGE,
       )
