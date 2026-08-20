@@ -11,7 +11,7 @@ fun main(args: Array<String>) {
   EditorFrame.show(dirs)
 }
 
-/** Finds supported decomp submodules. */
+/** Finds supported decomp submodules (GBA and Gen 4 DS). */
 fun findDecompRoots(start: File): List<File> {
   var dir = start.absoluteFile
   repeat(10) {
@@ -20,7 +20,14 @@ fun findDecompRoots(start: File): List<File> {
         listOf("pokeemerald", "pokefirered").mapNotNull { name ->
           val f = File(decomp, name)
           if (File(f, "data/maps/map_groups.json").exists()) f else null
-        }
+        } +
+            listOf("pokeheartgold", "pokeplatinum", "pokeblack").mapNotNull { name ->
+              val f = File(decomp, name)
+              val isHg = File(f, "src/data/map_headers.h").isFile &&
+                  File(f, "include/constants/maps.h").isFile
+              val isPt = File(f, "include/data/map_headers.h").isFile
+              if (isHg || isPt) f else null
+            }
     if (found.isNotEmpty()) return found
     dir = dir.parentFile ?: return emptyList()
   }
