@@ -550,7 +550,7 @@ fun main(args: Array<String>) {
     val roots = findDecompRoots(File(".."))
     for (root in roots) {
       val isDs =
-          File(root, "include/constants/maps.h").isFile ||
+          File(root, "src/data/map_headers.h").isFile ||
               File(root, "include/data/map_headers.h").isFile
       if (!isDs) continue
       val p = NdsProject(root)
