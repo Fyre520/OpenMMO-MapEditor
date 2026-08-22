@@ -44,4 +44,15 @@ object NdsTileset {
       )
 
   fun color(index: Int): Color = tiles.getOrNull(index)?.topColor ?: Color(30, 30, 30)
+
+  /**
+   * First index reserved for project-defined tiles lifted off a map surface.
+   *
+   * Grids persist the tile *index*, so the built-in list and the custom list must never share a
+   * number. Starting custom tiles well past the end of [tiles] means new built-ins can be added
+   * later without silently repainting every saved map that used a custom tile.
+   */
+  const val CUSTOM_TILE_BASE = 1000
+
+  fun isCustom(index: Int): Boolean = index >= CUSTOM_TILE_BASE
 }

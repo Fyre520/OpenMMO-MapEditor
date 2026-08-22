@@ -387,6 +387,15 @@ interface Nds3DView {
    * that only need a grid cell. Surface selection turns it on so a drag can paint across geometry.
    */
   var surfacePicking: Boolean
+
+  /**
+   * Geometry for project-defined tiles, keyed by tile index, in unit-square tile space.
+   *
+   * Built-in tiles are flat colours the view generates itself; these carry real map surface, so
+   * the view has to be handed the triangles. Their textures arrive through [modelTextures] under
+   * the same names the triangles reference.
+   */
+  var customTileGeometry: Map<Int, List<NdsTri>>
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component

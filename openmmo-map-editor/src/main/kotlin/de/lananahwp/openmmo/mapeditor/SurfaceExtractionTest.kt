@@ -22,6 +22,7 @@ fun main(args: Array<String>) {
   testSquareCutPicksTheClickedLayer()
   testRecentring()
   testSnapshotRoundTrip()
+  testCustomTiles()
 
   // The end-to-end pass needs a real map to lift geometry off, so it only runs when the decomp
   // (and its ROM) are present locally, matching how the other ROM-dependent checks are gated.
@@ -31,6 +32,88 @@ fun main(args: Array<String>) {
   }
 
   println("surface extraction: all checks passed")
+}
+
+/**
+ * Project-defined tiles. The property that matters most here is index stability: grids persist the
+ * tile *index*, so a number that shifts or gets reused silently repaints saved maps.
+ */
+private fun testCustomTiles() {
+  val base = de.lananahwp.openmmo.mapeditor.core.NdsTileset.CUSTOM_TILE_BASE
+  check(!de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(base - 1))
+  check(de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(base))
+  check(base > de.lananahwp.openmmo.mapeditor.core.NdsTileset.tiles.size) {
+    "custom tiles must start past every built-in, or the two collide"
+  }
+
+  // A square cut somewhere out on the map, at some arbitrary height and size.
+  val snapshot = NdsMeshSnapshot(
+      listOf(
+          NdsTri(
+              ax = 20f, ay = 7f, az = 30f, bx = 22f, by = 7f, bz = 30f, cx = 22f, cy = 7f, cz = 32f,
+              color = -1, u0 = 0f, v0 = 0f, u1 = 16f, v1 = 0f, u2 = 16f, v2 = 16f,
+              texture = "grass", palette = "grass_pl"),
+          NdsTri(
+              ax = 20f, ay = 7f, az = 30f, bx = 22f, by = 7f, bz = 32f, cx = 20f, cy = 7f, cz = 32f,
+              color = -1, u0 = 0f, v0 = 0f, u1 = 16f, v1 = 16f, u2 = 0f, v2 = 16f,
+              texture = "grass", palette = "grass_pl"),
+      ),
+      linkedMapOf("grass" to NdsTexture("grass", 3, 4, 4, ByteArray(8), null, intArrayOf(1, 2), false)),
+      linkedMapOf("grass_pl" to intArrayOf(1, 2)),
+  )
+
+  val store = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore
+  val previousRoot = store.rootDir
+  val root = Files.createTempDirectory("openmmo-custom-tiles-").toFile()
+  try {
+    // Never touch the real user directory from a test.
+    store.rootDir = root
+    check(store.tiles().isEmpty()) { "a fresh store should have no tiles" }
+
+    val first = store.add("Olivine path", snapshot)
+    check(first.index == base) { "first tile should take the base index, got ${first.index}" }
+    val second = store.add("Park grass", snapshot)
+    check(second.index == base + 1) { "indices must advance, got ${second.index}" }
+
+    // Reloading from disk must preserve both the order and the numbers.
+    store.invalidate()
+    val listed = store.tiles()
+    check(listed.map { it.index } == listOf(base, base + 1)) { "tile indices changed on reload" }
+    check(listed.map { it.name } == listOf("Olivine path", "Park grass")) { "tile order changed" }
+
+    // Geometry must arrive in tile space: spanning 0..1 in X and Z, resting on y=0, or a painted
+    // tile would land offset from its square and at the source map's scale.
+    val mesh = store.mesh(base) ?: error("tile mesh did not reload")
+    val xs = mesh.triangles.flatMap { listOf(it.ax, it.bx, it.cx) }
+    val ys = mesh.triangles.flatMap { listOf(it.ay, it.by, it.cy) }
+    val zs = mesh.triangles.flatMap { listOf(it.az, it.bz, it.cz) }
+    check(kotlin.math.abs(xs.min()) < 1e-4f && kotlin.math.abs(xs.max() - 1f) < 1e-4f) {
+      "tile X should span 0..1, got ${xs.min()}..${xs.max()}"
+    }
+    check(kotlin.math.abs(zs.min()) < 1e-4f && kotlin.math.abs(zs.max() - 1f) < 1e-4f) {
+      "tile Z should span 0..1, got ${zs.min()}..${zs.max()}"
+    }
+    check(kotlin.math.abs(ys.min()) < 1e-4f) { "tile should rest on y=0, got ${ys.min()}" }
+    check(mesh.textures.containsKey("grass")) { "tile lost its texture" }
+
+    // Adding a third after a reload must not reuse a number already handed out.
+    val third = store.add("Third", snapshot)
+    check(third.index == base + 2) { "index was reused after reload: ${third.index}" }
+
+    // Textures are namespaced per tile so two tiles cut from different maps cannot collide on a
+    // shared texture name -- the shared store makes that reachable in a way per-project never was.
+    val geometry = store.viewGeometry()
+    check(geometry.keys.containsAll(setOf(base, base + 1, base + 2)))
+    check(geometry.getValue(base).all { it.texture.startsWith(store.texturePrefix(base)) }) {
+      "tile textures were not namespaced"
+    }
+    check(geometry.getValue(base + 1).none { it.texture.startsWith(store.texturePrefix(base)) }) {
+      "two tiles shared a texture namespace"
+    }
+  } finally {
+    store.rootDir = previousRoot
+    root.deleteRecursively()
+  }
 }
 
 /**

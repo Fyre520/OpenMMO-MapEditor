@@ -80,6 +80,12 @@ class NdsGlMapView(
 
   override var surfacePicking: Boolean = false
 
+  override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
+    set(value) {
+      field = value
+      repaint()
+    }
+
   override var modelTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
     set(value) {
       field = value
@@ -369,11 +375,15 @@ class NdsGlMapView(
         for (z in 0 until g.rows) {
           val tile = g.tileAt(layer, x, z)
           if (tile < 0) continue
-          val def = NdsTileset.tiles.getOrNull(tile) ?: continue
           // Squares with no terrain over them keep sitting on the grid plane, so paint stays
           // visible on the open ground around a map as well as on the map itself.
           val ground = surface?.get(x)?.get(z)?.takeIf { !it.isNaN() } ?: 0.0
           val base = ground + g.heightAt(layer, x, z).toDouble()
+          if (NdsTileset.isCustom(tile)) {
+            customTileGeometry[tile]?.let { drawCustomTile(gl, xf, it, x, z, base) }
+            continue
+          }
+          val def = NdsTileset.tiles.getOrNull(tile) ?: continue
           when (def.shape) {
             TileShape.FLAT -> {
               val top = shade(def.topColor, layer)
@@ -396,6 +406,75 @@ class NdsGlMapView(
     gl.glDisable(GL2.GL_POLYGON_OFFSET_FILL)
     gl.glDisable(GL2.GL_BLEND)
     gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  /**
+   * Draws a project-defined tile: real map surface, textured, translated into its cell.
+   *
+   * Geometry arrives in unit-square tile space, so placing it is a translation by the cell and by
+   * the height already worked out for that square. Texturing follows the same path the map model
+   * uses, including the DS convention that an untextured face renders flat-shaded rather than
+   * sampling a default white texture.
+   */
+  private fun drawCustomTile(
+      gl: GL2,
+      xf: ModelXform?,
+      triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+      cellX: Int,
+      cellZ: Int,
+      base: Double,
+  ) {
+    if (triangles.isEmpty() || xf == null) return
+    gl.glEnable(GL2.GL_ALPHA_TEST)
+    gl.glAlphaFunc(GL2.GL_GREATER, 0.05f)
+    var boundTex = -1
+    var texturingOn = false
+    for (tri in triangles) {
+      val texId = if (tri.texture.isNotEmpty()) glTextureId(gl, tri.texture, tri.palette) else -1
+      val wantTextured = texId != -1
+      if (wantTextured != texturingOn) {
+        if (wantTextured) gl.glEnable(GL2.GL_TEXTURE_2D) else gl.glDisable(GL2.GL_TEXTURE_2D)
+        texturingOn = wantTextured
+      }
+      if (texId != boundTex) {
+        gl.glBindTexture(GL2.GL_TEXTURE_2D, if (texId == -1) 0 else texId)
+        boundTex = texId
+      }
+      val tex = if (texId != -1) modelTextures[tri.texture] else null
+      val tw = tex?.width ?: 1
+      val th = tex?.height ?: 1
+      val color = Color(tri.color, true)
+      gl.glColor4f(color.red / 255f, color.green / 255f, color.blue / 255f, 1f)
+      gl.glBegin(GL2.GL_TRIANGLES)
+      customTileVertex(gl, tri.ax, tri.ay, tri.az, tri.u0, tri.v0, tw, th, texId != -1, tri, xf, cellX, cellZ, base)
+      customTileVertex(gl, tri.bx, tri.by, tri.bz, tri.u1, tri.v1, tw, th, texId != -1, tri, xf, cellX, cellZ, base)
+      customTileVertex(gl, tri.cx, tri.cy, tri.cz, tri.u2, tri.v2, tw, th, texId != -1, tri, xf, cellX, cellZ, base)
+      gl.glEnd()
+    }
+    gl.glBindTexture(GL2.GL_TEXTURE_2D, 0)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glDisable(GL2.GL_ALPHA_TEST)
+  }
+
+  private fun customTileVertex(
+      gl: GL2,
+      x: Float,
+      y: Float,
+      z: Float,
+      u: Float,
+      v: Float,
+      tw: Int,
+      th: Int,
+      textured: Boolean,
+      tri: de.lananahwp.openmmo.mapeditor.core.NdsTri,
+      xf: ModelXform,
+      cellX: Int,
+      cellZ: Int,
+      base: Double,
+  ) {
+    if (textured) gl.glTexCoord2f((u / tw) * tri.scaleS, 1f - (v / th) * tri.scaleT)
+    // Tile space is one unit per square, so the cell index is the translation.
+    groundVertex(gl, (cellX + x).toDouble(), base + y * xf.scale, (cellZ + z).toDouble(), xf)
   }
 
   private fun drawTileCube(

@@ -80,6 +80,41 @@ class NdsSoftwareMapView(
 
   override var surfacePicking: Boolean = false
 
+  override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
+    set(value) {
+      field = value
+      repaint()
+    }
+
+  /**
+   * Painted project-defined tiles, moved into their cells so the textured pass can draw them
+   * alongside the map's own geometry.
+   *
+   * Like the flat tiles this view already draws, they sit at grid height rather than following the
+   * map surface; the OpenGL view resolves the surface height per square, this fallback does not.
+   */
+  private fun placedCustomTileTriangles(): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    val g = grid ?: return emptyList()
+    if (customTileGeometry.isEmpty()) return emptyList()
+    val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+    for (layer in 0 until NdsGrid.LAYERS) {
+      for (x in 0 until g.cols) for (z in 0 until g.rows) {
+        val tile = g.tileAt(layer, x, z)
+        if (tile < 0 || !de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(tile)) continue
+        val geometry = customTileGeometry[tile] ?: continue
+        val base = g.heightAt(layer, x, z).toFloat()
+        for (t in geometry) {
+          out += t.copy(
+              ax = x + t.ax, ay = base + t.ay, az = z + t.az,
+              bx = x + t.bx, by = base + t.by, bz = z + t.bz,
+              cx = x + t.cx, cy = base + t.cy, cz = z + t.cz,
+          )
+        }
+      }
+    }
+    return out
+  }
+
   /** Decoded NSBMD model triangles rendered over the grid. */
   override var modelTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
     set(value) {
@@ -450,7 +485,10 @@ class NdsSoftwareMapView(
   private fun drawTexturedTriangles(g2: Graphics2D) {
     if (modelOpacity <= 0f) return
     val m = modelXform() ?: return
-    val textured = modelTriangles.filter { it.texture.isNotEmpty() && it.texture in modelTextures }
+    // Painted custom tiles join the map's own geometry here so they are textured and
+    // depth-buffered against it rather than drawn as flat colour.
+    val textured = (modelTriangles + placedCustomTileTriangles())
+        .filter { it.texture.isNotEmpty() && it.texture in modelTextures }
     if (textured.isEmpty()) return
     val cam = camera()
     val img = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)

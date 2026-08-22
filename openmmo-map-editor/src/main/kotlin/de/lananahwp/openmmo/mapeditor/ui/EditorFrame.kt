@@ -226,6 +226,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsSurfaceSameTexture = JCheckBox("Same texture only", true)
   private val ndsSurfaceCut = JComboBox(arrayOf("Whole squares", "Free-form"))
   private val ndsSurfaceSaveButton = JButton("Save selection as prop...")
+  private val ndsSurfaceAddTileButton = JButton("Add as tile")
+
+  /** Tile ids in the order the Tile combo lists them; built-ins first, then project tiles. */
+  private var ndsTileIds: List<Int> = NdsTileset.tiles.indices.toList()
   private val ndsSurfaceClearButton = JButton("Clear selection")
   private val ndsSurfaceCells = LinkedHashSet<Long>()
 
@@ -558,7 +562,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             NdsTileset.tiles.map { it.name }.toTypedArray())
     ndsTileCombo.selectedIndex = 0
     ndsTileCombo.addActionListener {
-      view()?.activeTile = ndsTileCombo.selectedIndex.coerceAtLeast(0)
+      view()?.activeTile = ndsTileIds.getOrElse(ndsTileCombo.selectedIndex.coerceAtLeast(0)) { 0 }
     }
     ndsLayerSpinner.preferredSize = Dimension(60, ndsLayerSpinner.preferredSize.height)
     ndsLayerSpinner.addChangeListener {
@@ -623,6 +627,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
     }
     ndsSurfaceSaveButton.addActionListener { saveNdsSurfaceSelectionAsProp() }
+    ndsSurfaceAddTileButton.toolTipText =
+        "Add the picked square to the Tile list so it can be painted like any other tile " +
+            "(select exactly one square)"
+    ndsSurfaceAddTileButton.addActionListener { addNdsSurfaceSelectionAsTile() }
     ndsSurfaceClearButton.addActionListener {
       clearNdsSurfaceSelection()
       status.text = "Cleared the surface selection"
@@ -653,6 +661,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     surfaceToolbar.add(JLabel("Cut:"))
     surfaceToolbar.add(ndsSurfaceCut)
     surfaceToolbar.add(ndsSurfaceSaveButton)
+    surfaceToolbar.add(ndsSurfaceAddTileButton)
     surfaceToolbar.add(ndsSurfaceClearButton)
     surfaceToolbar.add(JLabel("  Drag paints · Shift+drag boxes · Ctrl removes"))
     onNdsPaintModeChanged()
@@ -1358,6 +1367,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.modelTriangles = if (bld.isEmpty()) tris else tris + bld
     v.modelTextures = ref.holder.project.texturesFor(map)
     v.modelPalettes = ref.holder.project.palettesFor(map)
+    refreshNdsCustomTiles(ref.holder.project.texturesFor(map), ref.holder.project.palettesFor(map))
+    refreshNdsTileCombo()
     ndsHeaderPanel.setMap(map)
     ndsEventsPanel.setMap(map)
     selectedNdsPropId = null
@@ -2538,6 +2549,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsSurfaceSameTexture.isEnabled = surfaceMode
     ndsSurfaceCut.isEnabled = surfaceMode
     ndsSurfaceSaveButton.isEnabled = surfaceMode
+    ndsSurfaceAddTileButton.isEnabled = surfaceMode
     ndsSurfaceClearButton.isEnabled = surfaceMode
     // Only this mode needs the pointer resolved against the mesh on every drag event. Read the
     // field rather than view(), which would build the GL canvas just to set a flag.
@@ -2547,6 +2559,92 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       status.text =
           "Pick Surface: click the map squares you want, then Save selection as prop... " +
               "(drag paints, Shift+drag boxes, Ctrl removes)"
+    }
+  }
+
+  /**
+   * Rebuilds the Tile combo from the built-in set plus this project's own tiles.
+   *
+   * The combo's position is not the tile id: project tiles are numbered from
+   * [NdsTileset.CUSTOM_TILE_BASE] so they can never collide with a built-in, so the two are kept
+   * in step through [ndsTileIds].
+   */
+  private fun refreshNdsTileCombo(preferredId: Int? = null) {
+    val custom = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore.tiles()
+    val wanted = preferredId ?: ndsTileIds.getOrNull(ndsTileCombo.selectedIndex)
+    ndsTileIds = NdsTileset.tiles.indices.toList() + custom.map { it.index }
+    val names = NdsTileset.tiles.map { it.name } + custom.map { it.name }
+    ndsTileCombo.model = javax.swing.DefaultComboBoxModel(names.toTypedArray())
+    val position = wanted?.let { ndsTileIds.indexOf(it) }?.takeIf { it >= 0 } ?: 0
+    ndsTileCombo.selectedIndex = position
+    ndsView?.activeTile = ndsTileIds.getOrElse(position) { 0 }
+  }
+
+  /**
+   * Hands the view this project's tile geometry, and merges the textures it needs into the ones
+   * already loaded for the map.
+   *
+   * Tile textures are namespaced per tile, the same way catalog props are, so a tile lifted from
+   * one map cannot be repainted by a same-named texture belonging to another.
+   */
+  private fun refreshNdsCustomTiles(mapTextures: Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture>,
+                                    mapPalettes: Map<String, IntArray>) {
+    val store = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore
+    val v = ndsView ?: return
+    val textures = LinkedHashMap(mapTextures)
+    val palettes = LinkedHashMap(mapPalettes)
+    for (tile in store.tiles()) {
+      val mesh = store.mesh(tile.index) ?: continue
+      val prefix = store.texturePrefix(tile.index)
+      for ((name, tex) in mesh.textures) textures[prefix + name] = tex
+      for ((name, pal) in mesh.palettes) palettes[prefix + name] = pal
+    }
+    v.modelTextures = textures
+    v.modelPalettes = palettes
+    v.customTileGeometry = store.viewGeometry()
+  }
+
+  /** Adds the single picked square to the project's tile set so it can be painted. */
+  private fun addNdsSurfaceSelectionAsTile() {
+    val map = currentNdsMap
+    val holder = currentNdsHolder
+    if (map == null || holder == null || ndsSurfaceCells.size != 1) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Pick exactly one square to add as a tile. " +
+              "There ${if (ndsSurfaceCells.size > 1) "are ${ndsSurfaceCells.size} squares" else "is none"} selected.",
+          "Add as Tile",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+    val snapshot = holder.project.buildSurfaceExtraction(
+        map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
+        ndsSurfacePickedHeights)
+    if (snapshot == null) {
+      JOptionPane.showMessageDialog(
+          this,
+          "That square has no geometry on it. Try turning off \"Same texture only\", or pick a " +
+              "square with visible terrain.",
+          "Add as Tile",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+    val name = JOptionPane.showInputDialog(
+        this, "Tile name", "Add as Tile", JOptionPane.PLAIN_MESSAGE, null, null,
+        "${map.displayName} tile")?.toString()?.trim()
+    if (name.isNullOrEmpty()) return
+    try {
+      val tile = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore.add(name, snapshot)
+      refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
+      refreshNdsTileCombo(tile.index)
+      ndsPaintMode.selectedIndex = 0
+      status.text =
+          "Added tile '${tile.name}' — selected in the Tile list and available on every map"
+    } catch (t: Throwable) {
+      JOptionPane.showMessageDialog(
+          this, t.message ?: t.toString(), "Add as Tile failed", JOptionPane.ERROR_MESSAGE)
     }
   }
 
@@ -2776,8 +2874,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val props = holder.project.buildingTrianglesFor(map)
     v.modelTriangles = terrain + props
     if (refreshTextures) {
-      v.modelTextures = holder.project.texturesFor(map)
-      v.modelPalettes = holder.project.palettesFor(map)
+      // Re-merges the project tile textures, which this would otherwise drop.
+      refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
     }
     refreshNdsMarkers()
     // Terrain just changed shape, so re-resolve which triangles the picked squares now hold.
