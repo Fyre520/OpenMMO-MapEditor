@@ -204,12 +204,45 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0, -32, 32, 1))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
   private val ndsPaintMode =
-      JComboBox(arrayOf("Tile", "Collision", "Permission", "Height", "Select Object / Move Prop", "Remove Scenery Object"))
+      JComboBox(arrayOf(
+          "Tile",
+          "Collision",
+          "Permission",
+          "Height",
+          "Select Object / Move Prop",
+          "Remove Scenery Object",
+          "Pick Surface -> Prop",
+      ))
   private val ndsGridCheck = JCheckBox("Grid")
   private val ndsCollisionCheck = JCheckBox("Collisions")
   private val ndsClearCollisionWithTerrain = JCheckBox("Clear collision with object", true)
   private val ndsCollisionEditView = JCheckBox("Transparent collision view")
   private val ndsRestoreTerrainButton = JButton("Restore last object")
+
+  // Surface picking ("Pick Surface -> Prop"). Kept entirely separate from the terrain-object
+  // selection above: this one is a set of map tiles, not a connected-component group, so flat
+  // ground like a path can be taken a square at a time.
+  private val ndsSurfaceBrushSpinner = JSpinner(SpinnerNumberModel(1, 1, 32, 1))
+  private val ndsSurfaceSameTexture = JCheckBox("Same texture only", true)
+  private val ndsSurfaceCut = JComboBox(arrayOf("Whole squares", "Free-form"))
+  private val ndsSurfaceSaveButton = JButton("Save selection as prop...")
+  private val ndsSurfaceClearButton = JButton("Clear selection")
+  private val ndsSurfaceCells = LinkedHashSet<Long>()
+
+  /**
+   * The mesh height the pointer met when each square was picked.
+   *
+   * Maps stack surfaces over one square — a tree canopy above its own ground, tall grass above the
+   * floor it grows from — so a square has to remember which one was actually clicked. Without it,
+   * squaring rebuilt roughly a fifth of National Park's squares up in the canopy.
+   */
+  private val ndsSurfacePickedHeights = HashMap<Long, Float>()
+  private var ndsSurfaceTextureFilter: String? = null
+  private var ndsSurfaceBoxAnchorX: Float? = null
+  private var ndsSurfaceBoxAnchorZ: Float? = null
+  private var ndsSurfaceBoxBaseCells: Set<Long> = emptySet()
+  private var ndsSurfaceErasing = false
+
   private var selectedNdsPropId: String? = null
   private var selectedNdsTerrainGroup: String? = null
   private var ndsPropDragOffsetX = 0f
@@ -541,6 +574,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     ndsPaintMode.addActionListener {
       view()?.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
+      onNdsPaintModeChanged()
     }
     ndsGridCheck.isSelected = true
     ndsGridCheck.addActionListener { view()?.showGrid = ndsGridCheck.isSelected }
@@ -564,6 +598,36 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     ndsRestoreTerrainButton.addActionListener { restoreLastNdsTerrainObject() }
 
+    ndsSurfaceBrushSpinner.preferredSize = Dimension(52, ndsSurfaceBrushSpinner.preferredSize.height)
+    ndsSurfaceBrushSpinner.toolTipText =
+        "How many map squares across each click selects: 1 picks the single square under the pointer"
+    ndsSurfaceSameTexture.toolTipText =
+        "Keep only the clicked surface's texture, so a path comes away without the grass it is joined to"
+    ndsSurfaceSameTexture.addActionListener {
+      // Toggling changes what the already-picked squares resolve to, so redraw immediately
+      // instead of waiting for the next click.
+      refreshNdsSurfaceHighlight()
+      if (ndsSurfaceCells.isNotEmpty()) {
+        status.text = "Surface selection: ${ndsSurfaceHighlightTriangles().size} triangle(s)" +
+            (ndsSurfaceTextureFilterOrNull()?.let { " of texture '$it'" } ?: " (all textures)")
+      }
+    }
+    ndsSurfaceCut.toolTipText =
+        "Whole squares: each picked square becomes one flat quad, easy to place and line up. " +
+            "Free-form: keeps the map's own slopes and walls exactly as they are."
+    ndsSurfaceCut.addActionListener {
+      refreshNdsSurfaceHighlight()
+      if (ndsSurfaceCells.isNotEmpty()) {
+        status.text = "Surface selection: ${ndsSurfaceHighlightTriangles().size} triangle(s) " +
+            "(${(ndsSurfaceCut.selectedItem as? String)?.lowercase()})"
+      }
+    }
+    ndsSurfaceSaveButton.addActionListener { saveNdsSurfaceSelectionAsProp() }
+    ndsSurfaceClearButton.addActionListener {
+      clearNdsSurfaceSelection()
+      status.text = "Cleared the surface selection"
+    }
+
     val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     toolbar.add(JLabel("Tile:"))
     toolbar.add(ndsTileCombo)
@@ -582,9 +646,20 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsRestoreTerrainButton)
     terrainToolbar.add(JLabel("  Middle drag rotates · Left click edits · Right drag pans · Wheel zooms"))
-    panel.add(JPanel(GridLayout(2, 1)).also {
+    val surfaceToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
+    surfaceToolbar.add(JLabel("Pick brush (squares):"))
+    surfaceToolbar.add(ndsSurfaceBrushSpinner)
+    surfaceToolbar.add(ndsSurfaceSameTexture)
+    surfaceToolbar.add(JLabel("Cut:"))
+    surfaceToolbar.add(ndsSurfaceCut)
+    surfaceToolbar.add(ndsSurfaceSaveButton)
+    surfaceToolbar.add(ndsSurfaceClearButton)
+    surfaceToolbar.add(JLabel("  Drag paints · Shift+drag boxes · Ctrl removes"))
+    onNdsPaintModeChanged()
+    panel.add(JPanel(GridLayout(3, 1)).also {
       it.add(toolbar)
       it.add(terrainToolbar)
+      it.add(surfaceToolbar)
     }, BorderLayout.NORTH)
     panel.add(ndsViewContainer, BorderLayout.CENTER)
     panel.add(ndsPropsPanel, BorderLayout.EAST)
@@ -1287,6 +1362,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsEventsPanel.setMap(map)
     selectedNdsPropId = null
     selectedNdsTerrainGroup = null
+    // A surface selection names squares on the map it was picked from, so it cannot carry over.
+    clearNdsSurfaceSelection()
+    v.surfacePicking = ndsPaintMode.selectedIndex == 6
     ndsPropsPanel.setModels(ref.holder.project.propModels())
     ndsPropsPanel.setMap(map)
     refreshNdsMarkers()
@@ -2342,7 +2420,178 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         if (!dragging) removeNdsSceneryObjectAt(hit)
         true
       }
+      6 -> {
+        handleNdsSurfacePick(hit, dragging)
+        true
+      }
       else -> false
+    }
+  }
+
+  // ---- Surface picking ------------------------------------------------------
+
+  /**
+   * Builds up a selection of individual map squares on the terrain mesh.
+   *
+   * Plain drag paints squares in; Shift+drag sweeps a box; holding Ctrl subtracts instead. The
+   * tile comes from where the pointer met the *geometry* ([NdsPointerHit.surfaceX]/[surfaceZ]),
+   * falling back to the ground-plane projection only when nothing was hit — on a map whose model
+   * floats above the grid those two are several squares apart, and the mesh position is the one
+   * that matches what the user sees under the cursor.
+   */
+  private fun handleNdsSurfacePick(hit: NdsPointerHit, dragging: Boolean) {
+    if (currentNdsMap == null || currentNdsHolder == null) return
+    val x = hit.surfaceX ?: hit.groundX ?: hit.cellX?.plus(0.5f) ?: return
+    val z = hit.surfaceZ ?: hit.groundZ ?: hit.cellZ?.plus(0.5f) ?: return
+
+    if (!dragging) {
+      ndsSurfaceErasing = hit.ctrlDown
+      // A fresh click on bare geometry re-arms the texture filter from whatever was clicked.
+      if (!hit.ctrlDown && hit.surfaceTexture != null && ndsSurfaceCells.isEmpty()) {
+        ndsSurfaceTextureFilter = hit.surfaceTexture.takeIf { it.isNotEmpty() }
+      }
+      if (hit.shiftDown) {
+        ndsSurfaceBoxAnchorX = x
+        ndsSurfaceBoxAnchorZ = z
+        ndsSurfaceBoxBaseCells = LinkedHashSet(ndsSurfaceCells)
+      } else {
+        ndsSurfaceBoxAnchorX = null
+        ndsSurfaceBoxAnchorZ = null
+      }
+    }
+
+    val anchorX = ndsSurfaceBoxAnchorX
+    val anchorZ = ndsSurfaceBoxAnchorZ
+    if (anchorX != null && anchorZ != null) {
+      // Recompute the whole box every drag event so shrinking it back releases squares again.
+      val box = NdsProject.surfaceRectCells(anchorX, anchorZ, x, z)
+      val rebuilt = LinkedHashSet(ndsSurfaceBoxBaseCells)
+      if (ndsSurfaceErasing) rebuilt -= box else rebuilt += box
+      ndsSurfaceCells.clear()
+      ndsSurfaceCells += rebuilt
+      // A box sweep only knows the height under the pointer, so every square it adds takes that
+      // one. It is the surface the user was tracing along, which is what they mean by the sweep.
+      if (!ndsSurfaceErasing) hit.surfaceY?.let { y -> for (cell in box) ndsSurfacePickedHeights[cell] = y }
+    } else {
+      val brush = NdsProject.surfaceBrushCells(x, z, (ndsSurfaceBrushSpinner.value as Number).toInt())
+      if (ndsSurfaceErasing) {
+        ndsSurfaceCells -= brush
+        ndsSurfacePickedHeights.keys -= brush
+      } else {
+        ndsSurfaceCells += brush
+        hit.surfaceY?.let { y -> for (cell in brush) ndsSurfacePickedHeights[cell] = y }
+      }
+    }
+
+    ndsSurfacePickedHeights.keys.retainAll(ndsSurfaceCells)
+    if (ndsSurfaceCells.isEmpty()) ndsSurfaceTextureFilter = null
+    refreshNdsSurfaceHighlight()
+    val triangles = ndsSurfaceHighlightTriangles().size
+    val filter = ndsSurfaceTextureFilter
+    status.text = if (ndsSurfaceCells.isEmpty()) {
+      "Surface selection cleared"
+    } else {
+      "Selected ${ndsSurfaceCells.size} square(s), $triangles triangle(s)" +
+          (if (filter != null && ndsSurfaceSameTexture.isSelected) " of texture '$filter'" else "") +
+          " — Save selection as prop... to keep it"
+    }
+  }
+
+  /** The currently selected terrain triangles, as drawn in the viewport. */
+  private fun ndsSurfaceHighlightTriangles(): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    if (ndsSurfaceCells.isEmpty()) return emptyList()
+    val map = currentNdsMap ?: return emptyList()
+    val project = currentNdsHolder?.project ?: return emptyList()
+    return project.surfaceTriangles(
+        map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
+        ndsSurfacePickedHeights)
+  }
+
+  private fun ndsSurfaceTextureFilterOrNull(): String? =
+      if (ndsSurfaceSameTexture.isSelected) ndsSurfaceTextureFilter else null
+
+  private fun ndsSurfaceCutMode(): NdsProject.SurfaceCut =
+      if (ndsSurfaceCut.selectedIndex == 1) NdsProject.SurfaceCut.FREEFORM
+      else NdsProject.SurfaceCut.SQUARES
+
+  private fun refreshNdsSurfaceHighlight() {
+    val v = ndsView ?: return
+    v.highlightTriangles = ndsSurfaceHighlightTriangles()
+    v.asComponent().repaint()
+  }
+
+  private fun clearNdsSurfaceSelection() {
+    ndsSurfaceCells.clear()
+    ndsSurfacePickedHeights.clear()
+    ndsSurfaceTextureFilter = null
+    ndsSurfaceBoxAnchorX = null
+    ndsSurfaceBoxAnchorZ = null
+    ndsSurfaceBoxBaseCells = emptySet()
+    ndsSurfaceErasing = false
+    refreshNdsSurfaceHighlight()
+  }
+
+  /** Enables the per-mode extras and drops selection state that no longer applies. */
+  private fun onNdsPaintModeChanged() {
+    val surfaceMode = ndsPaintMode.selectedIndex == 6
+    ndsSurfaceBrushSpinner.isEnabled = surfaceMode
+    ndsSurfaceSameTexture.isEnabled = surfaceMode
+    ndsSurfaceCut.isEnabled = surfaceMode
+    ndsSurfaceSaveButton.isEnabled = surfaceMode
+    ndsSurfaceClearButton.isEnabled = surfaceMode
+    // Only this mode needs the pointer resolved against the mesh on every drag event. Read the
+    // field rather than view(), which would build the GL canvas just to set a flag.
+    ndsView?.surfacePicking = surfaceMode
+    if (!surfaceMode && ndsSurfaceCells.isNotEmpty()) clearNdsSurfaceSelection()
+    if (surfaceMode) {
+      status.text =
+          "Pick Surface: click the map squares you want, then Save selection as prop... " +
+              "(drag paints, Shift+drag boxes, Ctrl removes)"
+    }
+  }
+
+  /** Bakes the picked squares into a reusable catalog prop. */
+  private fun saveNdsSurfaceSelectionAsProp() {
+    val map = currentNdsMap
+    val holder = currentNdsHolder
+    if (map == null || holder == null || ndsSurfaceCells.isEmpty()) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Pick some map squares first: choose \"Pick Surface -> Prop\" mode, then click the " +
+              "part of the map you want to copy.",
+          "Save Selection as Prop",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+    val snapshot = holder.project.buildSurfaceExtraction(
+        map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
+        ndsSurfacePickedHeights)
+    if (snapshot == null) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Those squares contain no geometry. Try turning off \"Same texture only\", or pick a " +
+              "square that has visible terrain on it.",
+          "Save Selection as Prop",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+    val suggested = "${map.displayName} surface"
+    val label = JOptionPane.showInputDialog(
+        this, "Name for the catalog entry", "Save Selection as Prop",
+        JOptionPane.PLAIN_MESSAGE, null, null, suggested)?.toString()?.trim()
+    if (label.isNullOrEmpty()) return
+    try {
+      val saved = holder.project.saveExtractedProp(label, snapshot, map.name)
+      ndsPropsPanel.setModels(holder.project.propModels())
+      ndsPropsPanel.selectModel(saved.key)
+      status.text =
+          "Saved '${saved.label}' (${snapshot.triangles.size} triangles) to the prop catalog — " +
+              "open any map and use Place at center"
+    } catch (t: Throwable) {
+      JOptionPane.showMessageDialog(
+          this, t.message ?: t.toString(), "Save Selection as Prop failed", JOptionPane.ERROR_MESSAGE)
     }
   }
 
@@ -2531,6 +2780,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       v.modelPalettes = holder.project.palettesFor(map)
     }
     refreshNdsMarkers()
+    // Terrain just changed shape, so re-resolve which triangles the picked squares now hold.
+    refreshNdsSurfaceHighlight()
     v.asComponent().repaint()
   }
 

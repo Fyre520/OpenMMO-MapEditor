@@ -69,6 +69,17 @@ class NdsSoftwareMapView(
   var paintMode: PaintMode = PaintMode.TILE
   override var markers: List<NdsEventMarker> = emptyList()
 
+  override var highlightTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      highlightOutline = ndsOutlineEdges(value)
+      repaint()
+    }
+
+  private var highlightOutline: List<FloatArray> = emptyList()
+
+  override var surfacePicking: Boolean = false
+
   /** Decoded NSBMD model triangles rendered over the grid. */
   override var modelTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
     set(value) {
@@ -108,7 +119,10 @@ class NdsSoftwareMapView(
             lastX = e.x
             lastY = e.y
             if (e.button == MouseEvent.BUTTON1) {
-              val hit = pointerHit(e.x, e.y, includeModelGroup = true) ?: return
+              val hit =
+                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  else pointerHit(e.x, e.y, includeModelGroup = true)
+              if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ)
               }
@@ -140,7 +154,12 @@ class NdsSoftwareMapView(
               centerZ += (dx * -sinYaw + dy * -cosYaw) * s
               repaint()
             } else if (SwingUtilities.isLeftMouseButton(e)) {
-              val hit = pointerHit(e.x, e.y, includeModelGroup = false) ?: return
+              // Surface picking keeps resolving the mesh while dragging, because painting a
+              // selection across it needs the tile under the geometry, not under the ground plane.
+              val hit =
+                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  else pointerHit(e.x, e.y, includeModelGroup = false)
+              if (hit == null) return
               if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ)
               }
@@ -338,6 +357,39 @@ class NdsSoftwareMapView(
     drawFaces(g2, tiles)
     drawFaces(g2, markerFaces)
     drawTexturedTriangles(g2)
+    // After the textured pass, so the selection stays visible on top of the geometry it marks.
+    drawHighlightTriangles(g2, cam)
+  }
+
+  /** Draws the current selection as a tinted, outlined overlay over the geometry it was taken from. */
+  private fun drawHighlightTriangles(g2: Graphics2D, cam: Camera) {
+    if (highlightTriangles.isEmpty()) return
+    val m = modelXform() ?: return
+    val fill = Color(255, 209, 38, 110)
+    val outline = Color(255, 243, 140, 240)
+    val faces = ArrayList<Face>(highlightTriangles.size)
+    for (tri in highlightTriangles) {
+      val a = project(viewCoords(cam, xform(tri.ax, tri.ay, tri.az, m))) ?: continue
+      val b = project(viewCoords(cam, xform(tri.bx, tri.by, tri.bz, m))) ?: continue
+      val c = project(viewCoords(cam, xform(tri.cx, tri.cy, tri.cz, m))) ?: continue
+      faces += Face(
+          (a[2] + b[2] + c[2]) / 3.0,
+          intArrayOf(a[0].toInt(), b[0].toInt(), c[0].toInt()),
+          intArrayOf(a[1].toInt(), b[1].toInt(), c[1].toInt()),
+          fill,
+      )
+    }
+    faces.sortedByDescending { it.depth }.forEach { f ->
+      g2.color = f.fill
+      g2.fillPolygon(f.xs, f.ys, f.xs.size)
+    }
+    // Only the silhouette, not every triangle edge; see ndsOutlineEdges.
+    g2.color = outline
+    for (e in highlightOutline) {
+      val a = project(viewCoords(cam, xform(e[0], e[1], e[2], m))) ?: continue
+      val b = project(viewCoords(cam, xform(e[3], e[4], e[5], m))) ?: continue
+      g2.drawLine(a[0].toInt(), a[1].toInt(), b[0].toInt(), b[1].toInt())
+    }
   }
 
   private class ModelXform(val scale: Float, val cx: Float, val cz: Float, val groundY: Float)
@@ -648,6 +700,43 @@ class NdsSoftwareMapView(
             width, height, yaw, pitch, distance, centerX, centerZ,
             transform.scale, transform.cx, transform.cz, transform.groundY,
         ),
+    )
+  }
+
+  /**
+   * The pointer resolved against the mesh, for surface picking only.
+   *
+   * Kept separate from [pointerHit] so the paint and object modes keep resolving clicks exactly as
+   * they did; nothing here is on their path.
+   */
+  private fun surfacePointerHit(mx: Int, my: Int, shiftDown: Boolean, ctrlDown: Boolean): NdsPointerHit? {
+    val ground = pickRay(mx, my)?.let(::groundPoint)
+    val cell = ground?.let(::groundCell)
+    val transform = modelXform()
+    val surface = transform?.let {
+      pickNdsModelSurfaceAtScreen(
+          modelTriangles,
+          mx,
+          my,
+          NdsScreenPickView(
+              width, height, yaw, pitch, distance, centerX, centerZ,
+              it.scale, it.cx, it.cz, it.groundY,
+          ),
+      )
+    }
+    if (ground == null && surface == null) return null
+    return NdsPointerHit(
+        cell?.first,
+        cell?.second,
+        surface?.triangle?.editGroup?.takeIf { it.isNotEmpty() },
+        ground?.first,
+        ground?.second,
+        surface?.x,
+        surface?.y,
+        surface?.z,
+        surface?.triangle?.texture,
+        shiftDown,
+        ctrlDown,
     )
   }
 

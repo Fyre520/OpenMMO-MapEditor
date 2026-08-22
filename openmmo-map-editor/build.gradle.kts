@@ -56,6 +56,13 @@ tasks.register<JavaExec>("glTest") {
     )
 }
 
+tasks.register<JavaExec>("surfaceExtractionTest") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.SurfaceExtractionTestKt")
+  args(projectDir.parentFile.absolutePath)
+}
+
 tasks.register<JavaExec>("seamDiagnostic") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath
@@ -82,4 +89,18 @@ tasks.register<JavaExec>("propCatalogSheets") {
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.NdsPropCatalogGeneratorKt")
   args(projectDir.parentFile.absolutePath, layout.buildDirectory.dir("prop-catalog").get().asFile.absolutePath)
+}
+
+tasks.register<JavaExec>("meshInspect") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.MeshInspectKt")
+  args(providers.gradleProperty("mesh").getOrElse(""))
+}
+
+tasks.register<JavaExec>("surfaceDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.SurfaceDiagnosticKt")
+  args(projectDir.parentFile.absolutePath, providers.gradleProperty("map").getOrElse("MAP_NATIONAL_PARK"))
 }

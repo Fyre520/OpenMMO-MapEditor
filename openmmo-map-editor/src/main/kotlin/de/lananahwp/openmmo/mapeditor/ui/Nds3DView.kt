@@ -19,6 +19,29 @@ data class NdsPointerHit(
     /** Continuous map-space ground position; retained even outside the grid for uninterrupted dragging. */
     val groundX: Float? = null,
     val groundZ: Float? = null,
+    /**
+     * Where the pointer actually met the mesh, in map-tile space.
+     *
+     * [groundX]/[groundZ] project the pointer onto the y=0 ground plane, which is only the same
+     * place when the terrain also sits at y=0. Maps whose model floats above the grid (their lowest
+     * geometry, not their walkable floor, is what gets pinned to y=0) put the two several tiles
+     * apart, so anything picking geometry must use these instead.
+     */
+    val surfaceX: Float? = null,
+    val surfaceY: Float? = null,
+    val surfaceZ: Float? = null,
+    /** Texture name of the picked triangle, for "same texture only" surface selection. */
+    val surfaceTexture: String? = null,
+    val shiftDown: Boolean = false,
+    val ctrlDown: Boolean = false,
+)
+
+/** A picked model triangle plus the map-tile-space point where the pointer met it. */
+internal class NdsSurfaceHit(
+    val triangle: NdsTri,
+    val x: Float,
+    val y: Float,
+    val z: Float,
 )
 
 internal data class NdsPickRay(val origin: DoubleArray, val direction: DoubleArray)
@@ -83,6 +106,43 @@ internal fun ndsPickRay(
   )
 }
 
+/**
+ * The outline of a set of triangles: only edges belonging to exactly one of them.
+ *
+ * Stroking every triangle draws the triangulation itself — each square split by the diagonal
+ * between its two triangles, and a line along every seam between neighbouring squares — which
+ * reads as a lattice rather than a selection. Edges shared by two triangles are interior, so
+ * dropping them leaves the silhouette of the whole selected region.
+ *
+ * Endpoints are quantised before comparison so that two triangles meeting at a shared corner agree
+ * on it despite floating-point drift.
+ */
+internal fun ndsOutlineEdges(triangles: List<NdsTri>): List<FloatArray> {
+  if (triangles.isEmpty()) return emptyList()
+  fun key(x: Float, y: Float, z: Float): Long {
+    val qx = Math.round(x * 256.0).toLong() and 0x1FFFFF
+    val qy = Math.round(y * 256.0).toLong() and 0x1FFFFF
+    val qz = Math.round(z * 256.0).toLong() and 0x1FFFFF
+    return (qx shl 42) or (qy shl 21) or qz
+  }
+  val counts = HashMap<Pair<Long, Long>, Int>(triangles.size * 3)
+  val coords = HashMap<Pair<Long, Long>, FloatArray>(triangles.size * 3)
+  fun edge(ax: Float, ay: Float, az: Float, bx: Float, by: Float, bz: Float) {
+    val ka = key(ax, ay, az)
+    val kb = key(bx, by, bz)
+    if (ka == kb) return
+    val id = if (ka <= kb) ka to kb else kb to ka
+    counts[id] = (counts[id] ?: 0) + 1
+    coords.getOrPut(id) { floatArrayOf(ax, ay, az, bx, by, bz) }
+  }
+  for (t in triangles) {
+    edge(t.ax, t.ay, t.az, t.bx, t.by, t.bz)
+    edge(t.bx, t.by, t.bz, t.cx, t.cy, t.cz)
+    edge(t.cx, t.cy, t.cz, t.ax, t.ay, t.az)
+  }
+  return counts.entries.filter { it.value == 1 }.mapNotNull { coords[it.key] }
+}
+
 internal data class NdsScreenPickView(
     val width: Int,
     val height: Int,
@@ -125,6 +185,60 @@ internal fun pickNdsModelGroupAtScreen(
       closestDepth = depth
       selected = tri.editGroup
     }
+  }
+  return selected
+}
+
+/**
+ * Picks the frontmost triangle under the pointer and reports where on it the pointer landed.
+ *
+ * A separate path from [pickNdsModelGroupAtScreen], which the established paint and object modes
+ * use and which is deliberately left untouched. This one additionally keeps the intersection
+ * point, which is what lets surface picking work out which map tile was clicked on the *mesh* —
+ * independent of where the same pointer would land on the y=0 ground plane.
+ */
+internal fun pickNdsModelSurfaceAtScreen(
+    triangles: List<NdsTri>,
+    mouseX: Int,
+    mouseY: Int,
+    view: NdsScreenPickView,
+): NdsSurfaceHit? {
+  val projector = NdsScreenProjector(view) ?: return null
+  var closestDepth = Double.POSITIVE_INFINITY
+  var selected: NdsSurfaceHit? = null
+  for (tri in triangles) {
+    if (tri.editGroup.isEmpty()) continue
+    val a = projector.project(tri.ax, tri.ay, tri.az) ?: continue
+    val b = projector.project(tri.bx, tri.by, tri.bz) ?: continue
+    val c = projector.project(tri.cx, tri.cy, tri.cz) ?: continue
+    val denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+    if (abs(denominator) < 1e-7) continue
+    val px = mouseX.toDouble()
+    val py = mouseY.toDouble()
+    val u = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / denominator
+    val v = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / denominator
+    val w = 1.0 - u - v
+    if (u < -0.002 || v < -0.002 || w < -0.002) continue
+    val depth = u * a[2] + v * b[2] + w * c[2]
+    if (depth >= closestDepth) continue
+    closestDepth = depth
+    // Screen-space barycentrics are not linear in model space; dividing each by its vertex depth
+    // and renormalizing recovers the perspective-correct weights, so the reported point stays on
+    // the right tile even on large triangles seen at a grazing angle.
+    val ua = u / a[2]
+    val vb = v / b[2]
+    val wc = w / c[2]
+    val sum = ua + vb + wc
+    if (abs(sum) < 1e-12) continue
+    val fa = (ua / sum).toFloat()
+    val fb = (vb / sum).toFloat()
+    val fc = (wc / sum).toFloat()
+    selected = NdsSurfaceHit(
+        tri,
+        tri.ax * fa + tri.bx * fb + tri.cx * fc,
+        tri.ay * fa + tri.by * fb + tri.cy * fc,
+        tri.az * fa + tri.bz * fb + tri.cz * fc,
+    )
   }
   return selected
 }
@@ -259,6 +373,20 @@ interface Nds3DView {
   var showGrid: Boolean
   var showCollision: Boolean
   var markers: List<NdsEventMarker>
+
+  /**
+   * Triangles drawn tinted and outlined on top of the model to show what is currently selected.
+   * These are copies of geometry already in [modelTriangles]; they are not part of the map.
+   */
+  var highlightTriangles: List<NdsTri>
+
+  /**
+   * Whether left-drag should keep resolving the mesh surface under the pointer.
+   *
+   * Off by default: picking tests every model triangle, which is wasted work for the paint modes
+   * that only need a grid cell. Surface selection turns it on so a drag can paint across geometry.
+   */
+  var surfacePicking: Boolean
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component

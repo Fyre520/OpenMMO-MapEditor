@@ -23,6 +23,354 @@ class NdsProject(val rootDir: File) {
   /** 1 DS map-model unit = 4 tiles (map cells are ~8 units per 32x32 tile cell). */
   private val TILE_SCALE = 4f
 
+  /** How picked geometry is cut out of the map. */
+  enum class SurfaceCut {
+    /**
+     * Each picked square is rebuilt as one flat quad, two triangles, cornered exactly on the tile
+     * boundary. Predictable to work with afterwards, and walls standing in the square are dropped.
+     */
+    SQUARES,
+
+    /**
+     * Exactly the geometry standing on the picked squares, clipped to them but otherwise left as
+     * the map built it. Keeps slopes, overhangs and walls that squaring would flatten away.
+     */
+    FREEFORM,
+  }
+
+  companion object {
+    /** Catalog category for props lifted straight off another map's mesh. */
+    const val EXTRACTED_CATEGORY = "Extracted"
+
+    /** Packs a map-tile coordinate into a single key for selection sets. */
+    fun surfaceCellKey(x: Int, z: Int): Long = (x.toLong() shl 32) or (z.toLong() and 0xFFFFFFFFL)
+
+    fun surfaceCellX(key: Long): Int = (key shr 32).toInt()
+
+    fun surfaceCellZ(key: Long): Int = key.toInt()
+
+    /**
+     * The map tiles a brush covers, centred on the tile containing ([x], [z]).
+     *
+     * [size] is measured in tiles: 1 selects the single square under the pointer, 2 a 2x2 block,
+     * and so on. Even sizes grow right/down so the clicked square is always included.
+     */
+    fun surfaceBrushCells(x: Float, z: Float, size: Int): Set<Long> {
+      val span = size.coerceAtLeast(1)
+      val originX = kotlin.math.floor(x.toDouble()).toInt() - (span - 1) / 2
+      val originZ = kotlin.math.floor(z.toDouble()).toInt() - (span - 1) / 2
+      val out = LinkedHashSet<Long>(span * span)
+      for (dz in 0 until span) for (dx in 0 until span) {
+        out += surfaceCellKey(originX + dx, originZ + dz)
+      }
+      return out
+    }
+
+    /** Every tile in the rectangle spanned by two map-space corners. */
+    fun surfaceRectCells(x0: Float, z0: Float, x1: Float, z1: Float): Set<Long> {
+      val minX = kotlin.math.floor(minOf(x0, x1).toDouble()).toInt()
+      val maxX = kotlin.math.floor(maxOf(x0, x1).toDouble()).toInt()
+      val minZ = kotlin.math.floor(minOf(z0, z1).toDouble()).toInt()
+      val maxZ = kotlin.math.floor(maxOf(z0, z1).toDouble()).toInt()
+      val out = LinkedHashSet<Long>()
+      for (z in minZ..maxZ) for (x in minX..maxX) out += surfaceCellKey(x, z)
+      return out
+    }
+
+    /**
+     * Cuts out exactly the geometry standing on the given tiles.
+     *
+     * Map terrain is not tiled one quad per square: a flat stretch of Olivine ground is a single
+     * 5x5-tile quad, so picking a triangle whole — by centroid, or by any other whole-triangle
+     * rule — hands back far more map than the user asked for. Each triangle is therefore clipped
+     * to the selected squares, which is the only way "one square" can mean one square regardless
+     * of how coarse the source mesh is.
+     *
+     * [textureFilter], when set, keeps only triangles using that texture — the way to lift a path
+     * off the grass it is welded to.
+     */
+    fun filterSurfaceTriangles(
+        triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+        cells: Set<Long>,
+        textureFilter: String? = null,
+        cut: SurfaceCut = SurfaceCut.SQUARES,
+        pickedHeights: Map<Long, Float>? = null,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      if (cells.isEmpty()) return emptyList()
+      val candidates =
+          if (textureFilter == null) triangles else triangles.filter { it.texture == textureFilter }
+      if (candidates.isEmpty()) return emptyList()
+
+      if (cut == SurfaceCut.SQUARES) {
+        val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>(cells.size * 2)
+        for (cell in cells) {
+          out += squareForCell(
+              candidates, surfaceCellX(cell), surfaceCellZ(cell), pickedHeights?.get(cell))
+        }
+        return out
+      }
+
+      val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+      for (tri in candidates) {
+        val triMinX = minOf(tri.ax, tri.bx, tri.cx)
+        val triMaxX = maxOf(tri.ax, tri.bx, tri.cx)
+        val triMinZ = minOf(tri.az, tri.bz, tri.cz)
+        val triMaxZ = maxOf(tri.az, tri.bz, tri.cz)
+        for (cell in cells) {
+          val cellX = surfaceCellX(cell).toFloat()
+          val cellZ = surfaceCellZ(cell).toFloat()
+          // Skip the clip entirely when the triangle cannot reach this square.
+          if (triMaxX <= cellX || triMinX >= cellX + 1f) continue
+          if (triMaxZ <= cellZ || triMinZ >= cellZ + 1f) continue
+          out += clipTriangleToCell(tri, cellX, cellZ)
+        }
+      }
+      return out
+    }
+
+    /** Height and texture coordinates read off a triangle's plane at some XZ point. */
+    private class PlaneSample(val y: Float, val u: Float, val v: Float, val inside: Boolean)
+
+    /**
+     * Reads a triangle's plane at an XZ point, reporting whether the point is actually within the
+     * triangle. Points outside still return a value, extrapolated along the same plane, which is
+     * what lets a square be completed from the surface that dominates it.
+     *
+     * Returns null for faces that are vertical in XZ — a wall has no height to read at a point.
+     */
+    private fun samplePlane(
+        tri: de.lananahwp.openmmo.mapeditor.core.NdsTri,
+        x: Float,
+        z: Float,
+    ): PlaneSample? {
+      val d = (tri.bz - tri.cz) * (tri.ax - tri.cx) + (tri.cx - tri.bx) * (tri.az - tri.cz)
+      if (kotlin.math.abs(d) < 1e-9f) return null
+      val wa = ((tri.bz - tri.cz) * (x - tri.cx) + (tri.cx - tri.bx) * (z - tri.cz)) / d
+      val wb = ((tri.cz - tri.az) * (x - tri.cx) + (tri.ax - tri.cx) * (z - tri.cz)) / d
+      val wc = 1f - wa - wb
+      return PlaneSample(
+          tri.ay * wa + tri.by * wb + tri.cy * wc,
+          tri.u0 * wa + tri.u1 * wb + tri.u2 * wc,
+          tri.v0 * wa + tri.v1 * wb + tri.v2 * wc,
+          wa >= -1e-4f && wb >= -1e-4f && wc >= -1e-4f,
+      )
+    }
+
+    /** Ground-plane area of a triangle, which is ~0 for a wall and ~1 for a full map square. */
+    private fun footprintArea(tri: de.lananahwp.openmmo.mapeditor.core.NdsTri): Float =
+        kotlin.math.abs(
+            (tri.bx - tri.ax) * (tri.cz - tri.az) - (tri.cx - tri.ax) * (tri.bz - tri.az)) / 2f
+
+    /**
+     * Rebuilds one map square as a single flat quad — two triangles spanning the square exactly.
+     *
+     * Clipping alone returns whatever fragments the source mesh happens to be built from, which is
+     * awkward to work with afterwards: a square can come back as a five-sided sliver fan, and any
+     * wall standing in the square comes along with it. Here the square's own four corners are
+     * sampled off the surface that covers most of it, so the result is always two triangles with
+     * the corners exactly on the tile boundary.
+     *
+     * Walls are excluded for free: a vertical face projects to no ground-plane area at all, so it
+     * is never a candidate.
+     *
+     * Which surface a square is built from is decided by [pickedY] — the height the pointer met
+     * the mesh at. Maps stack surfaces over the same square (a tree canopy over its own ground,
+     * tall grass over the floor it grows from), and choosing purely by footprint area picked the
+     * canopy roughly a fifth of the time on National Park: the square came out up in the leaves
+     * instead of on the ground the user had clicked. With no reference height the lowest surface
+     * wins, which is the walkable floor.
+     */
+    private fun squareForCell(
+        triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+        cellX: Int,
+        cellZ: Int,
+        pickedY: Float? = null,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      val x0 = cellX.toFloat()
+      val z0 = cellZ.toFloat()
+      class Candidate(
+          val tri: de.lananahwp.openmmo.mapeditor.core.NdsTri,
+          val area: Float,
+          val height: Float,
+      )
+      val candidates = ArrayList<Candidate>()
+      for (tri in triangles) {
+        if (maxOf(tri.ax, tri.bx, tri.cx) <= x0 || minOf(tri.ax, tri.bx, tri.cx) >= x0 + 1f) continue
+        if (maxOf(tri.az, tri.bz, tri.cz) <= z0 || minOf(tri.az, tri.bz, tri.cz) >= z0 + 1f) continue
+        var area = 0f
+        var height = 0f
+        var weight = 0f
+        for (piece in clipTriangleToCell(tri, x0, z0)) {
+          val a = footprintArea(piece)
+          area += a
+          height += (piece.ay + piece.by + piece.cy) / 3f * a
+          weight += a
+        }
+        // Ignore surfaces that only graze the square, so a brush overhanging the map edge does not
+        // manufacture tiles out of slivers.
+        if (area < 0.05f) continue
+        candidates += Candidate(tri, area, if (weight > 0f) height / weight else 0f)
+      }
+      if (candidates.isEmpty()) return emptyList()
+
+      val source = if (pickedY != null) {
+        // The surface the pointer actually landed on, ties broken toward the larger one.
+        candidates.minWithOrNull(
+            compareBy<Candidate> { kotlin.math.abs(it.height - pickedY) }
+                .thenByDescending { it.area })!!.tri
+      } else {
+        // No reference: take the floor, not whatever is stacked above it.
+        candidates.minWithOrNull(
+            compareBy<Candidate> { it.height }.thenByDescending { it.area })!!.tri
+      }
+
+      val corners = arrayOf(
+          x0 to z0,
+          x0 + 1f to z0,
+          x0 + 1f to z0 + 1f,
+          x0 to z0 + 1f,
+      )
+      val samples = corners.map { (cx, cz) ->
+        val fromSource = samplePlane(source, cx, cz)
+        if (fromSource != null && fromSource.inside) return@map fromSource
+        // The chosen surface does not reach this corner, so prefer a neighbour that does and
+        // shares its texture; that keeps a square straddling two coplanar quads continuous. The
+        // neighbour must also sit at about the same height, or a corner could snap up to a canopy
+        // stacked over the same square.
+        val neighbour = triangles.asSequence()
+            .filter { it !== source && it.texture == source.texture }
+            .mapNotNull { samplePlane(it, cx, cz) }
+            .filter { it.inside }
+            .firstOrNull { fromSource == null || kotlin.math.abs(it.y - fromSource.y) < 0.5f }
+        neighbour ?: fromSource ?: return emptyList()
+      }
+
+      fun corner(index: Int) = Triple(corners[index].first, samples[index].y, corners[index].second)
+      val p0 = corner(0); val p1 = corner(1); val p2 = corner(2); val p3 = corner(3)
+      return listOf(
+          source.copy(
+              ax = p0.first, ay = p0.second, az = p0.third, u0 = samples[0].u, v0 = samples[0].v,
+              bx = p1.first, by = p1.second, bz = p1.third, u1 = samples[1].u, v1 = samples[1].v,
+              cx = p2.first, cy = p2.second, cz = p2.third, u2 = samples[2].u, v2 = samples[2].v,
+          ),
+          source.copy(
+              ax = p0.first, ay = p0.second, az = p0.third, u0 = samples[0].u, v0 = samples[0].v,
+              bx = p2.first, by = p2.second, bz = p2.third, u1 = samples[2].u, v1 = samples[2].v,
+              cx = p3.first, cy = p3.second, cz = p3.third, u2 = samples[3].u, v2 = samples[3].v,
+          ),
+      )
+    }
+
+    /** One vertex carried through clipping: position plus the attributes that vary across a face. */
+    private class ClipVertex(val x: Float, val y: Float, val z: Float, val u: Float, val v: Float)
+
+    /**
+     * Sutherland-Hodgman clip of one triangle against a single map square in XZ, re-triangulated.
+     *
+     * Height and texture coordinates vary linearly across a triangle, so interpolating them by the
+     * same edge parameter used for the position keeps the cut piece sitting flush in the original
+     * surface with its texture unbroken.
+     */
+    private fun clipTriangleToCell(
+        tri: de.lananahwp.openmmo.mapeditor.core.NdsTri,
+        cellX: Float,
+        cellZ: Float,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      var poly = listOf(
+          ClipVertex(tri.ax, tri.ay, tri.az, tri.u0, tri.v0),
+          ClipVertex(tri.bx, tri.by, tri.bz, tri.u1, tri.v1),
+          ClipVertex(tri.cx, tri.cy, tri.cz, tri.u2, tri.v2),
+      )
+      // Signed distance into the square for each of its four edges; positive means "keep".
+      val planes = listOf<(ClipVertex) -> Float>(
+          { it.x - cellX },
+          { (cellX + 1f) - it.x },
+          { it.z - cellZ },
+          { (cellZ + 1f) - it.z },
+      )
+      for (inside in planes) {
+        if (poly.isEmpty()) return emptyList()
+        val next = ArrayList<ClipVertex>(poly.size + 2)
+        for (i in poly.indices) {
+          val current = poly[i]
+          val previous = poly[(i + poly.size - 1) % poly.size]
+          val dCurrent = inside(current)
+          val dPrevious = inside(previous)
+          if (dCurrent >= 0f) {
+            if (dPrevious < 0f) next += lerpClip(previous, current, dPrevious / (dPrevious - dCurrent))
+            next += current
+          } else if (dPrevious >= 0f) {
+            next += lerpClip(previous, current, dPrevious / (dPrevious - dCurrent))
+          }
+        }
+        poly = next
+      }
+      if (poly.size < 3) return emptyList()
+
+      val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>(poly.size - 2)
+      for (i in 1 until poly.size - 1) {
+        val a = poly[0]
+        val b = poly[i]
+        val c = poly[i + 1]
+        // Drop slivers produced by clipping exactly along an existing edge.
+        val area = kotlin.math.abs(
+            (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z)) / 2f
+        val vertical = kotlin.math.abs(
+            (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) +
+            kotlin.math.abs((b.z - a.z) * (c.y - a.y) - (c.z - a.z) * (b.y - a.y))
+        if (area < 1e-6f && vertical < 1e-6f) continue
+        out += tri.copy(
+            ax = a.x, ay = a.y, az = a.z, u0 = a.u, v0 = a.v,
+            bx = b.x, by = b.y, bz = b.z, u1 = b.u, v1 = b.v,
+            cx = c.x, cy = c.y, cz = c.z, u2 = c.u, v2 = c.v,
+        )
+      }
+      return out
+    }
+
+    private fun lerpClip(from: ClipVertex, to: ClipVertex, t: Float): ClipVertex {
+      val k = t.coerceIn(0f, 1f)
+      return ClipVertex(
+          from.x + (to.x - from.x) * k,
+          from.y + (to.y - from.y) * k,
+          from.z + (to.z - from.z) * k,
+          from.u + (to.u - from.u) * k,
+          from.v + (to.v - from.v) * k,
+      )
+    }
+
+    /**
+     * Recentres selected geometry onto its own origin: centred in XZ, resting on y=0.
+     *
+     * This is what [createProp] expects of catalog geometry, so a placement lands where it is
+     * clicked instead of back at the source map's coordinates.
+     */
+    fun recentreSurfaceTriangles(
+        selected: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      if (selected.isEmpty()) return emptyList()
+      var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+      var minY = Float.MAX_VALUE
+      var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
+      for (t in selected) {
+        for (v in floatArrayOf(t.ax, t.bx, t.cx)) { minX = minOf(minX, v); maxX = maxOf(maxX, v) }
+        for (v in floatArrayOf(t.ay, t.by, t.cy)) { minY = minOf(minY, v) }
+        for (v in floatArrayOf(t.az, t.bz, t.cz)) { minZ = minOf(minZ, v); maxZ = maxOf(maxZ, v) }
+      }
+      val centerX = (minX + maxX) / 2f
+      val centerZ = (minZ + maxZ) / 2f
+      return selected.map { t ->
+        t.copy(
+            ax = t.ax - centerX, ay = t.ay - minY, az = t.az - centerZ,
+            bx = t.bx - centerX, by = t.by - minY, bz = t.bz - centerZ,
+            cx = t.cx - centerX, cy = t.cy - minY, cz = t.cz - centerZ,
+            // The snapshot is its own model now; a source-map group id would be meaningless here.
+            editGroup = "",
+        )
+      }
+    }
+  }
+
   data class PropModelInfo(
       val key: String,
       val label: String,
@@ -73,6 +421,9 @@ class NdsProject(val rootDir: File) {
   private val propTriangleCache = HashMap<String, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>>()
   private val propTexturePackCache = HashMap<String, List<ByteArray>>()
   private val terrainTriangleCache = HashMap<String, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>>()
+
+  /** Baked meshes for extracted props; a null value caches "this key is not an extracted prop". */
+  private val propMeshCache = HashMap<String, de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot?>()
 
   data class TerrainObjectSelection(
       val groupId: String,
@@ -664,6 +1015,93 @@ class NdsProject(val rootDir: File) {
       map.terrainTransforms.firstOrNull { it.groupId == groupId }
           ?.let { it.offsetX to it.offsetZ } ?: (0f to 0f)
 
+  // ---- Surface selection ---------------------------------------------------
+  //
+  // Deliberately independent of the TerrainObjectSelection machinery above. That system answers
+  // "which connected scenery object did I click", which is the wrong question for ground surfaces:
+  // a path is welded to the map floor, so connected-component grouping hands back the entire
+  // terrain, and terrainSelection() then rejects it anyway for being flat (height < 0.35) and
+  // large (span > 14). Surface selection instead works on individual triangles keyed by map tile,
+  // so you pick the few squares you actually want and nothing else.
+
+  /** Terrain triangles sitting on the given tiles. See [filterSurfaceTriangles]. */
+  fun surfaceTriangles(
+      map: NdsMap,
+      cells: Set<Long>,
+      textureFilter: String? = null,
+      cut: SurfaceCut = SurfaceCut.SQUARES,
+      pickedHeights: Map<Long, Float>? = null,
+  ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> =
+      filterSurfaceTriangles(trianglesFor(map), cells, textureFilter, cut, pickedHeights)
+
+  /**
+   * Bakes selected terrain into a standalone mesh: geometry recentred on its own origin plus every
+   * texture and palette it references, resolved through the source map's texture packs.
+   */
+  fun buildSurfaceExtraction(
+      map: NdsMap,
+      cells: Set<Long>,
+      textureFilter: String? = null,
+      cut: SurfaceCut = SurfaceCut.SQUARES,
+      pickedHeights: Map<Long, Float>? = null,
+  ): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
+    val triangles =
+        recentreSurfaceTriangles(surfaceTriangles(map, cells, textureFilter, cut, pickedHeights))
+    if (triangles.isEmpty()) return null
+
+    val referencedTextures = triangles.map { it.texture }.filter { it.isNotEmpty() }.toSet()
+    val referencedPalettes = triangles.map { it.palette }.filter { it.isNotEmpty() }.toSet()
+    val mapTextures = texturesFor(map)
+    val mapPalettes = palettesFor(map)
+    val textures = LinkedHashMap<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture>()
+    for (name in referencedTextures) {
+      (mapTextures[name] ?: mapTextures[baseTextureName(name)])?.let { textures[name] = it }
+    }
+    val palettes = LinkedHashMap<String, IntArray>()
+    for (name in referencedPalettes) mapPalettes[name]?.let { palettes[name] = it }
+    return de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot(triangles, textures, palettes)
+  }
+
+  /** Stores a baked surface extraction in the reusable prop catalog under a user-chosen name. */
+  fun saveExtractedProp(
+      label: String,
+      snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
+      sourceMap: String,
+  ): PropModelInfo {
+    require(snapshot.triangles.isNotEmpty()) { "The selection contains no geometry to save" }
+    var base = label.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+    if (base.isEmpty()) base = "surface"
+    var key = "extracted:$base"
+    var suffix = 2
+    while (propModelManifest(key).exists()) key = "extracted:${base}_${suffix++}"
+    val dir = propModelDir(key)
+    dir.mkdirs()
+    de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot.write(propMeshFile(key), snapshot)
+    val resolvedLabel = label.trim().ifEmpty { "Surface from $sourceMap" }
+    val manifest = Json.JObj(linkedMapOf(
+        "version" to Json.JNum(1.0),
+        "key" to Json.JStr(key),
+        "label" to Json.JStr(resolvedLabel),
+        "source" to Json.JStr("extracted"),
+        "sourceMap" to Json.JStr(sourceMap),
+        "triangles" to Json.JNum(snapshot.triangles.size.toDouble()),
+    ))
+    propModelManifest(key).writeText(JsonWriter.writePretty(manifest) + "\n")
+    propTriangleCache.remove(key)
+    propTexturePackCache.remove(key)
+    propMeshCache.remove(key)
+    return PropModelInfo(key, resolvedLabel, true, EXTRACTED_CATEGORY)
+  }
+
+  /** The baked mesh behind an extracted catalog prop, or null for ROM/imported models. */
+  private fun extractedMesh(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
+    if (modelKey.startsWith("rom:")) return null
+    if (modelKey in propMeshCache) return propMeshCache[modelKey]
+    val loaded = de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot.read(propMeshFile(modelKey))
+    propMeshCache[modelKey] = loaded
+    return loaded
+  }
+
   /** Moves one connected object that is baked into the terrain without modifying the source model. */
   fun moveTerrainObject(map: NdsMap, groupId: String, offsetX: Float, offsetZ: Float): Boolean {
     if (terrainObject(map, groupId) == null) return false
@@ -845,7 +1283,7 @@ class NdsProject(val rootDir: File) {
     val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
     for (prop in map.props) {
       val imported = !prop.modelKey.startsWith("rom:")
-      val namespaceTextures = imported && propTexturePacks(prop.modelKey).isNotEmpty()
+      val namespaceTextures = imported && propHasOwnTextures(prop.modelKey)
       for (tri in propModelTriangles(prop.modelKey)) {
         fun transform(x: Float, y: Float, z: Float): FloatArray {
           var px = x.toDouble(); var py = y.toDouble(); var pz = z.toDouble()
@@ -932,6 +1370,8 @@ class NdsProject(val rootDir: File) {
         }
       }
       for (key in map.props.map { it.modelKey }.filter { !it.startsWith("rom:") }.distinct()) {
+        // An extracted prop carries its textures in its own baked mesh rather than an NSBTX pack.
+        for ((name, tex) in extractedPropTextures(key)) merged.putIfAbsent(name, tex)
         for (packBytes in propTexturePacks(key)) {
           for (tex in de.lananahwp.openmmo.mapeditor.core.NdsNsbtx.parse(packBytes)) {
             merged.putIfAbsent("$key::${tex.name}", tex)
@@ -975,6 +1415,8 @@ class NdsProject(val rootDir: File) {
         for ((name, colors) in pack.palettes) out.putIfAbsent(name, colors)
       }
       for (key in map.props.map { it.modelKey }.filter { !it.startsWith("rom:") }.distinct()) {
+        // An extracted prop carries its palettes in its own baked mesh rather than an NSBTX pack.
+        for ((name, colors) in extractedPropPalettes(key)) out.putIfAbsent(name, colors)
         for (packBytes in propTexturePacks(key)) {
           val pack = de.lananahwp.openmmo.mapeditor.core.NdsNsbtx.parsePack(packBytes)
           for ((name, colors) in pack.palettes) out.putIfAbsent("$key::$name", colors)
@@ -1081,6 +1523,8 @@ class NdsProject(val rootDir: File) {
   private fun propModelFile(key: String): File = File(propModelDir(key), "model.nsbmd")
 
   private fun propTextureFile(key: String): File = File(propModelDir(key), "textures.nsbtx")
+
+  private fun propMeshFile(key: String): File = File(propModelDir(key), "mesh.bin")
 
   private fun customMapNames(): List<String> =
       customMapsDir().listFiles()
@@ -1198,11 +1642,20 @@ class NdsProject(val rootDir: File) {
   /** ROM building models plus reusable models imported into this project. */
   fun propModels(): List<PropModelInfo> {
     val imported = propModelsDir().listFiles()
-        ?.filter { it.isDirectory && File(it, "model.json").isFile && File(it, "model.nsbmd").isFile }
+        ?.filter { it.isDirectory && File(it, "model.json").isFile }
         ?.mapNotNull { dir ->
           try {
             val o = JsonParser.parse(File(dir, "model.json").readText()).asObj() ?: return@mapNotNull null
-            PropModelInfo(o.str("key") ?: dir.name, o.str("label") ?: dir.name, true, "Imported")
+            // An imported prop is an NSBMD on disk; an extracted one is a baked mesh snapshot.
+            val extracted = o.str("source") == "extracted"
+            val payload = if (extracted) File(dir, "mesh.bin") else File(dir, "model.nsbmd")
+            if (!payload.isFile) return@mapNotNull null
+            PropModelInfo(
+                o.str("key") ?: dir.name,
+                o.str("label") ?: dir.name,
+                true,
+                if (extracted) EXTRACTED_CATEGORY else "Imported",
+            )
           } catch (_: Throwable) {
             null
           }
@@ -1220,6 +1673,11 @@ class NdsProject(val rootDir: File) {
   fun propModelPreview(modelKey: String, map: NdsMap?): PropModelPreview {
     val triangles = propModelTriangles(modelKey)
     if (triangles.isEmpty()) return PropModelPreview(emptyList(), emptyMap(), emptyMap())
+    // An extracted prop is fully self-describing; its snapshot already holds exactly the textures
+    // and palettes its triangles name, under those same (un-namespaced) names.
+    extractedMesh(modelKey)?.let { mesh ->
+      return PropModelPreview(mesh.triangles, mesh.textures, mesh.palettes)
+    }
     val referencedTextures = triangles.map { it.texture }.filter { it.isNotEmpty() }.toSet()
     val referencedPalettes = triangles.map { it.palette }.filter { it.isNotEmpty() }.toSet()
 
@@ -1280,8 +1738,15 @@ class NdsProject(val rootDir: File) {
     val raw = propModelTriangles(modelKey)
     require(raw.isNotEmpty()) { "The selected prop model contains no supported geometry" }
     val b = boundsOf(raw) ?: error("The selected prop has no bounds")
-    val span = maxOf(b.maxX - b.minX, b.maxZ - b.minZ, 0.0001f)
-    val scale = 1f / span
+    // An arbitrary NSBMD import has no meaningful relationship to tile size, so it gets normalised
+    // to a single tile. Extracted geometry was already measured in map tiles when it was lifted,
+    // so scaling it would shrink a 3x3 patch of path down to one square.
+    val scale = if (extractedMesh(modelKey) != null) {
+      1f
+    } else {
+      val span = maxOf(b.maxX - b.minX, b.maxZ - b.minZ, 0.0001f)
+      1f / span
+    }
     return NdsProp(
         id = "prop-${System.currentTimeMillis()}-${(Math.random() * 1_000_000).toInt()}",
         modelKey = modelKey,
@@ -1343,10 +1808,27 @@ class NdsProject(val rootDir: File) {
 
   private fun propModelTriangles(modelKey: String): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> =
       propTriangleCache.getOrPut(modelKey) {
-        propModelBytes(modelKey)?.let {
-          de.lananahwp.openmmo.mapeditor.core.NdsNsbmd.decode(it, worldScale = false)
-        }.orEmpty()
+        extractedMesh(modelKey)?.triangles
+            ?: propModelBytes(modelKey)?.let {
+              de.lananahwp.openmmo.mapeditor.core.NdsNsbmd.decode(it, worldScale = false)
+            }.orEmpty()
       }
+
+  /**
+   * Whether a catalog prop ships its own textures, and therefore needs its texture/palette names
+   * namespaced per model so two props cannot collide on a shared name like `tex0`.
+   */
+  private fun propHasOwnTextures(modelKey: String): Boolean =
+      extractedMesh(modelKey) != null || propTexturePacks(modelKey).isNotEmpty()
+
+  /** Namespaced textures contributed by an extracted prop, matching [editablePropTriangles]. */
+  private fun extractedPropTextures(
+      modelKey: String,
+  ): Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture> =
+      extractedMesh(modelKey)?.textures.orEmpty().mapKeys { "$modelKey::${it.key}" }
+
+  private fun extractedPropPalettes(modelKey: String): Map<String, IntArray> =
+      extractedMesh(modelKey)?.palettes.orEmpty().mapKeys { "$modelKey::${it.key}" }
 
   private fun validateImportFiles(modelFile: File?, textureFile: File?): Pair<Int, Int> {
     if (modelFile == null) {

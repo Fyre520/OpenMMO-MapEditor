@@ -67,6 +67,19 @@ class NdsGlMapView(
   var paintMode: PaintMode = PaintMode.TILE
   override var markers: List<NdsEventMarker> = emptyList()
 
+  override var highlightTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      // Computed once per selection change rather than per frame; a selection can be thousands
+      // of triangles and the outline only moves when the selection does.
+      highlightOutline = ndsOutlineEdges(value)
+      repaint()
+    }
+
+  private var highlightOutline: List<FloatArray> = emptyList()
+
+  override var surfacePicking: Boolean = false
+
   override var modelTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
     set(value) {
       field = value
@@ -111,7 +124,10 @@ class NdsGlMapView(
             lastX = e.x
             lastY = e.y
             if (e.button == MouseEvent.BUTTON1) {
-              val hit = pointerHit(e.x, e.y, includeModelGroup = true) ?: return
+              val hit =
+                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  else pointerHit(e.x, e.y, includeModelGroup = true)
+              if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ)
               }
@@ -142,7 +158,12 @@ class NdsGlMapView(
               centerZ += (dx * -sinYaw + dy * -cosYaw) * s
               repaint()
             } else if (SwingUtilities.isLeftMouseButton(e)) {
-              val hit = pointerHit(e.x, e.y, includeModelGroup = false) ?: return
+              // Surface picking keeps resolving the mesh while dragging, because painting a
+              // selection across it needs the tile under the geometry, not under the ground plane.
+              val hit =
+                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  else pointerHit(e.x, e.y, includeModelGroup = false)
+              if (hit == null) return
               if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ)
               }
@@ -202,6 +223,7 @@ class NdsGlMapView(
     drawGround(gl)
     drawModel(gl)
     drawPlacedTiles(gl)
+    drawHighlight(gl)
     drawMarkers(gl)
     gl.glFlush()
   }
@@ -498,6 +520,70 @@ class NdsGlMapView(
     gl.glEnable(GL2.GL_LIGHTING)
   }
 
+  /**
+   * Draws the current selection as a tinted, outlined overlay on the geometry it was taken from.
+   *
+   * Polygon offset pulls it a hair toward the camera so it wins the depth test against the very
+   * triangles it duplicates, while still being hidden by anything genuinely in front of them.
+   */
+  private fun drawHighlight(gl: GL2) {
+    if (highlightTriangles.isEmpty()) return
+    val xf = modelXform() ?: return
+    gl.glDisable(GL2.GL_LIGHTING)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glEnable(GL2.GL_BLEND)
+    gl.glBlendFunc(GL2.GL_SRC_ALPHA, GL2.GL_ONE_MINUS_SRC_ALPHA)
+    // The highlight duplicates geometry exactly coplanar with the terrain it marks, so it starts
+    // in a depth tie with it. glPolygonOffset breaks ties in depth-buffer units, whose size varies
+    // with viewing distance under a perspective projection -- which made the selection fade in and
+    // out as the camera zoomed. Lifting it a hair in world space instead is view-independent, so it
+    // reads the same at every zoom while still being properly hidden by anything genuinely in
+    // front of it. Depth writes stay off so it never occludes what is drawn after.
+    gl.glDepthMask(false)
+
+    gl.glColor4f(1f, 0.82f, 0.15f, 0.45f)
+    gl.glBegin(GL2.GL_TRIANGLES)
+    for (tri in highlightTriangles) {
+      highlightVertex(gl, tri.ax, tri.ay, tri.az, xf)
+      highlightVertex(gl, tri.bx, tri.by, tri.bz, xf)
+      highlightVertex(gl, tri.cx, tri.cy, tri.cz, xf)
+    }
+    gl.glEnd()
+
+    // Only the silhouette: stroking every triangle would draw the triangulation instead, each
+    // square crossed by its own diagonal and every seam between neighbours.
+    gl.glColor4f(1f, 0.95f, 0.55f, 0.95f)
+    gl.glLineWidth(2f)
+    gl.glBegin(GL2.GL_LINES)
+    for (e in highlightOutline) {
+      highlightVertex(gl, e[0], e[1], e[2], xf)
+      highlightVertex(gl, e[3], e[4], e[5], xf)
+    }
+    gl.glEnd()
+    gl.glLineWidth(1f)
+
+    gl.glDepthMask(true)
+    gl.glDisable(GL2.GL_BLEND)
+    gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  /**
+   * How far the selection is lifted off the surface it marks, in world units.
+   *
+   * The view fits a map into ~30 world units, so this is a small fraction of one map square --
+   * invisible in practice, but far larger than the depth-buffer resolution at the furthest zoom
+   * the camera allows, which is what keeps the selection from flickering against the terrain.
+   */
+  private val highlightLift = 0.02
+
+  private fun highlightVertex(gl: GL2, x: Float, y: Float, z: Float, xf: ModelXform) {
+    gl.glVertex3d(
+        16.0 + (x - xf.cx) * xf.scale,
+        (y - xf.groundY).toDouble() * xf.scale + highlightLift,
+        16.0 + (z - xf.cz) * xf.scale,
+    )
+  }
+
   private fun textureWrapMode(repeat: Boolean, flip: Boolean): Int =
       if (!repeat) GL2.GL_CLAMP_TO_EDGE
       else if (flip) GL2.GL_MIRRORED_REPEAT
@@ -668,6 +754,43 @@ class NdsGlMapView(
             width, height, yaw, pitch, distance, centerX, centerZ,
             xf.scale, xf.cx, xf.cz, xf.groundY,
         ),
+    )
+  }
+
+  /**
+   * The pointer resolved against the mesh, for surface picking only.
+   *
+   * Kept separate from [pointerHit] so the paint and object modes keep resolving clicks exactly as
+   * they did; nothing here is on their path.
+   */
+  private fun surfacePointerHit(mx: Int, my: Int, shiftDown: Boolean, ctrlDown: Boolean): NdsPointerHit? {
+    val ground = pickRay(mx, my)?.let(::groundPoint)
+    val cell = ground?.let(::groundCell)
+    val xf = modelXform()
+    val surface = xf?.let {
+      pickNdsModelSurfaceAtScreen(
+          modelTriangles,
+          mx,
+          my,
+          NdsScreenPickView(
+              width, height, yaw, pitch, distance, centerX, centerZ,
+              it.scale, it.cx, it.cz, it.groundY,
+          ),
+      )
+    }
+    if (ground == null && surface == null) return null
+    return NdsPointerHit(
+        cell?.first,
+        cell?.second,
+        surface?.triangle?.editGroup?.takeIf { it.isNotEmpty() },
+        ground?.first,
+        ground?.second,
+        surface?.x,
+        surface?.y,
+        surface?.z,
+        surface?.triangle?.texture,
+        shiftDown,
+        ctrlDown,
     )
   }
 
