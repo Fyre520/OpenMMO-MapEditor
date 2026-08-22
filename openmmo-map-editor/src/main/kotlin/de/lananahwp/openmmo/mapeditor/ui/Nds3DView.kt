@@ -23,6 +23,66 @@ data class NdsPointerHit(
 
 internal data class NdsPickRay(val origin: DoubleArray, val direction: DoubleArray)
 
+/**
+ * Vertical field of view, in degrees, shared by the 3D views.
+ *
+ * The projection the view renders with and the ray it picks with must use the same value, or the
+ * cursor resolves to a different place than the one drawn under it.
+ */
+internal const val NDS_FIELD_OF_VIEW = 45.0
+
+/**
+ * Builds a world-space ray through a viewport pixel from the orbit camera's own parameters.
+ *
+ * Deliberately independent of any GL state: mouse events arrive on the AWT event dispatch thread,
+ * where a GLCanvas's context is not current, so reading back the modelview/projection matrices
+ * there yields nothing usable. Deriving the ray from yaw/pitch/distance works on any thread and
+ * keeps both views picking identically.
+ */
+internal fun ndsPickRay(
+    width: Int,
+    height: Int,
+    yaw: Double,
+    pitch: Double,
+    distance: Double,
+    centerX: Double,
+    centerZ: Double,
+    mouseX: Int,
+    mouseY: Int,
+): NdsPickRay? {
+  if (width <= 0 || height <= 0) return null
+  val radYaw = Math.toRadians(yaw)
+  val radPitch = Math.toRadians(pitch)
+  val eye = doubleArrayOf(
+      centerX + distance * cos(radPitch) * sin(radYaw),
+      distance * sin(radPitch),
+      centerZ - distance * cos(radPitch) * cos(radYaw),
+  )
+  val forward = normalize3(doubleArrayOf(centerX - eye[0], -eye[1], centerZ - eye[2]))
+  val right = normalize3(cross3(forward, doubleArrayOf(0.0, 1.0, 0.0)))
+  val up = cross3(right, forward)
+
+  val aspect = width.toDouble() / height.coerceAtLeast(1)
+  val focal = 1.0 / tan(Math.toRadians(NDS_FIELD_OF_VIEW) / 2.0)
+  val sx = (mouseX.toDouble() / width - 0.5) * 2.0
+  val sy = (0.5 - mouseY.toDouble() / height) * 2.0
+  val vx = sx * aspect / focal
+  val vy = sy / focal
+
+  // View z grows away from the camera, so the ray runs from the near plane out to the far plane.
+  fun world(x: Double, y: Double, z: Double) = doubleArrayOf(
+      eye[0] + x * right[0] + y * up[0] + z * forward[0],
+      eye[1] + x * right[1] + y * up[1] + z * forward[1],
+      eye[2] + x * right[2] + y * up[2] + z * forward[2],
+  )
+  val near = world(vx, vy, 1.0)
+  val far = world(vx * 1000.0, vy * 1000.0, 1000.0)
+  return NdsPickRay(
+      near,
+      doubleArrayOf(far[0] - near[0], far[1] - near[1], far[2] - near[2]),
+  )
+}
+
 internal data class NdsScreenPickView(
     val width: Int,
     val height: Int,

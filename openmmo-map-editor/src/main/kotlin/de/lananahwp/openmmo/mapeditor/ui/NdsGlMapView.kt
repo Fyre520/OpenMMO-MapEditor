@@ -9,6 +9,7 @@ import com.jogamp.opengl.awt.GLCanvas
 import com.jogamp.opengl.glu.GLU
 import de.lananahwp.openmmo.mapeditor.core.NdsTexture
 import de.lananahwp.openmmo.mapeditor.core.NdsTileset
+import de.lananahwp.openmmo.mapeditor.core.TileShape
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import java.awt.Color
 import java.awt.Cursor
@@ -16,8 +17,6 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
 import java.nio.ByteBuffer
-import java.nio.FloatBuffer
-import java.nio.IntBuffer
 import javax.swing.SwingUtilities
 
 /**
@@ -54,6 +53,7 @@ class NdsGlMapView(
         centerZ = 16.0
         distance = 46.0
         modelXformCache = null
+        tileSurfaceCache = null
       }
       repaint()
     }
@@ -71,6 +71,9 @@ class NdsGlMapView(
     set(value) {
       field = value
       modelXformCache = null
+      // The per-square surface heights are derived from these triangles and the transform they
+      // produce, so both caches have to fall together.
+      tileSurfaceCache = null
       repaint()
     }
 
@@ -198,6 +201,7 @@ class NdsGlMapView(
     setupCamera(gl)
     drawGround(gl)
     drawModel(gl)
+    drawPlacedTiles(gl)
     drawMarkers(gl)
     gl.glFlush()
   }
@@ -211,7 +215,8 @@ class NdsGlMapView(
     gl.glMatrixMode(GL2.GL_PROJECTION)
     gl.glLoadIdentity()
     val aspect = width.toFloat() / height.coerceAtLeast(1)
-    glu.gluPerspective(45.0, aspect.toDouble(), 1.0, 1000.0)
+    // Must match the field of view pickRay uses, or the cursor resolves off from what is drawn.
+    glu.gluPerspective(NDS_FIELD_OF_VIEW, aspect.toDouble(), 1.0, 1000.0)
     gl.glMatrixMode(GL2.GL_MODELVIEW)
     gl.glLoadIdentity()
     val radYaw = Math.toRadians(yaw)
@@ -281,6 +286,146 @@ class NdsGlMapView(
       return
     }
     gl.glVertex3d(16.0 + (x - xf.cx) * xf.scale, y, 16.0 + (z - xf.cz) * xf.scale)
+  }
+
+  /**
+   * The top of the map's own geometry over each grid square, in world units, or null where the
+   * square has no terrain over it.
+   *
+   * Rebuilt whenever the model changes. Terrain is coarse (one quad can span many squares), so
+   * every square a triangle covers takes that triangle's height, not just the square holding its
+   * centroid — otherwise a large quad would leave every square but one without a surface.
+   */
+  private var tileSurfaceCache: Array<DoubleArray>? = null
+
+  private fun tileSurfaceHeights(g: NdsGrid, xf: ModelXform): Array<DoubleArray> {
+    tileSurfaceCache?.let { return it }
+    // NaN marks "no terrain here", so a square at world height 0 stays distinguishable from empty.
+    val out = Array(g.cols) { DoubleArray(g.rows) { Double.NaN } }
+    for (tri in modelTriangles) {
+      val minX = kotlin.math.floor(minOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
+      val maxX = kotlin.math.floor(maxOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
+      val minZ = kotlin.math.floor(minOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
+      val maxZ = kotlin.math.floor(maxOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
+      val top = maxOf(tri.ay, tri.by, tri.cy)
+      val worldTop = (top - xf.groundY).toDouble() * xf.scale
+      for (x in maxOf(0, minX)..minOf(g.cols - 1, maxX)) {
+        for (z in maxOf(0, minZ)..minOf(g.rows - 1, maxZ)) {
+          val current = out[x][z]
+          if (current.isNaN() || worldTop > current) out[x][z] = worldTop
+        }
+      }
+    }
+    tileSurfaceCache = out
+    return out
+  }
+
+  /**
+   * Renders tiles painted in Tile mode (grid.tiles / NdsTileset), the same flat/cube shapes
+   * NdsSoftwareMapView draws. This was previously missing here entirely — the GL view painted
+   * into grid.tiles correctly but never drew any of it, so Tile-mode brushes (Grass, Path, ...)
+   * appeared to do nothing.
+   */
+  private fun drawPlacedTiles(gl: GL2) {
+    val g = grid ?: return
+    val xf = modelXformCache
+    val surface = xf?.let { tileSurfaceHeights(g, it) }
+    gl.glDisable(GL2.GL_LIGHTING)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glEnable(GL2.GL_BLEND)
+    gl.glBlendFunc(GL2.GL_SRC_ALPHA, GL2.GL_ONE_MINUS_SRC_ALPHA)
+    // Painted tiles sit on the map's own surface, which is rarely the y=0 grid plane: the model
+    // is drawn at (y - groundY) * scale, and groundY is its LOWEST vertex, so any map whose
+    // walkable floor is above its lowest geometry renders that floor well above the grid. Drawing
+    // paint at grid height therefore buried it under the terrain, visible only through holes and
+    // around the edges. Polygon offset only settles coplanar ties, so it cannot cover a real
+    // vertical gap; the tile has to be lifted to the surface it was painted on.
+    gl.glEnable(GL2.GL_POLYGON_OFFSET_FILL)
+    gl.glPolygonOffset(-2f, -2f)
+    for (layer in 0 until NdsGrid.LAYERS) {
+      for (x in 0 until g.cols) {
+        for (z in 0 until g.rows) {
+          val tile = g.tileAt(layer, x, z)
+          if (tile < 0) continue
+          val def = NdsTileset.tiles.getOrNull(tile) ?: continue
+          // Squares with no terrain over them keep sitting on the grid plane, so paint stays
+          // visible on the open ground around a map as well as on the map itself.
+          val ground = surface?.get(x)?.get(z)?.takeIf { !it.isNaN() } ?: 0.0
+          val base = ground + g.heightAt(layer, x, z).toDouble()
+          when (def.shape) {
+            TileShape.FLAT -> {
+              val top = shade(def.topColor, layer)
+              gl.glColor4f(top.red / 255f, top.green / 255f, top.blue / 255f, 0.9f)
+              gl.glBegin(GL2.GL_QUADS)
+              groundVertex(gl, x.toDouble(), base + 0.01, z.toDouble(), xf)
+              groundVertex(gl, (x + 1).toDouble(), base + 0.01, z.toDouble(), xf)
+              groundVertex(gl, (x + 1).toDouble(), base + 0.01, (z + 1).toDouble(), xf)
+              groundVertex(gl, x.toDouble(), base + 0.01, (z + 1).toDouble(), xf)
+              gl.glEnd()
+            }
+            TileShape.CUBE, TileShape.BLOCK ->
+                drawTileCube(
+                    gl, xf, x, z, base, def.height.toDouble(),
+                    shade(def.topColor, layer), shade(def.sideColor, layer))
+          }
+        }
+      }
+    }
+    gl.glDisable(GL2.GL_POLYGON_OFFSET_FILL)
+    gl.glDisable(GL2.GL_BLEND)
+    gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  private fun drawTileCube(
+      gl: GL2,
+      xf: ModelXform?,
+      x: Int,
+      z: Int,
+      y0: Double,
+      h: Double,
+      top: Color,
+      side: Color,
+  ) {
+    val y1 = y0 + h
+    gl.glColor4f(top.red / 255f, top.green / 255f, top.blue / 255f, 0.95f)
+    gl.glBegin(GL2.GL_QUADS)
+    groundVertex(gl, x.toDouble(), y1, z.toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, z.toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, (z + 1).toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y1, (z + 1).toDouble(), xf)
+    gl.glEnd()
+    gl.glColor4f(side.red / 255f, side.green / 255f, side.blue / 255f, 0.95f)
+    gl.glBegin(GL2.GL_QUADS)
+    // -Z
+    groundVertex(gl, x.toDouble(), y0, z.toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y0, z.toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, z.toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y1, z.toDouble(), xf)
+    // +Z
+    groundVertex(gl, x.toDouble(), y0, (z + 1).toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y0, (z + 1).toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, (z + 1).toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y1, (z + 1).toDouble(), xf)
+    // -X
+    groundVertex(gl, x.toDouble(), y0, z.toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y0, (z + 1).toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y1, (z + 1).toDouble(), xf)
+    groundVertex(gl, x.toDouble(), y1, z.toDouble(), xf)
+    // +X
+    groundVertex(gl, (x + 1).toDouble(), y0, z.toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y0, (z + 1).toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, (z + 1).toDouble(), xf)
+    groundVertex(gl, (x + 1).toDouble(), y1, z.toDouble(), xf)
+    gl.glEnd()
+  }
+
+  /** Darkens a tile color per layer, matching NdsSoftwareMapView's shading. */
+  private fun shade(color: Color, layer: Int): Color {
+    val s = 1f - (layer * 0.06f)
+    return Color(
+        (color.red * s).toInt().coerceIn(0, 255),
+        (color.green * s).toInt().coerceIn(0, 255),
+        (color.blue * s).toInt().coerceIn(0, 255))
   }
 
   private fun drawModel(gl: GL2) {
@@ -501,31 +646,9 @@ class NdsGlMapView(
     }
   }
 
-  private fun pickRay(mx: Int, my: Int): NdsPickRay? {
-    val gl = context?.gl as? GL2 ?: return null
-    val viewport = IntBuffer.allocate(4)
-    val modelview = FloatBuffer.allocate(16)
-    val projection = FloatBuffer.allocate(16)
-    gl.glGetIntegerv(GL2.GL_VIEWPORT, viewport)
-    gl.glGetFloatv(GL2.GL_MODELVIEW_MATRIX, modelview)
-    gl.glGetFloatv(GL2.GL_PROJECTION_MATRIX, projection)
-    val winY = viewport.get(3) - my
-    val near = FloatBuffer.allocate(3)
-    val far = FloatBuffer.allocate(3)
-    val okNear = glu.gluUnProject(mx.toFloat(), winY.toFloat(), 0f, modelview, projection, viewport, near)
-    val okFar = glu.gluUnProject(mx.toFloat(), winY.toFloat(), 1f, modelview, projection, viewport, far)
-    if (!okNear || !okFar) return null
-    val nx = near.get(0)
-    val ny = near.get(1)
-    val nz = near.get(2)
-    val dx = far.get(0) - nx
-    val dy = far.get(1) - ny
-    val dz = far.get(2) - nz
-    return NdsPickRay(
-        doubleArrayOf(nx.toDouble(), ny.toDouble(), nz.toDouble()),
-        doubleArrayOf(dx.toDouble(), dy.toDouble(), dz.toDouble()),
-    )
-  }
+  /** Casts a pick ray from screen coordinates; see [ndsPickRay] for why GL matrices are unusable here. */
+  private fun pickRay(mx: Int, my: Int): NdsPickRay? =
+      ndsPickRay(width, height, yaw, pitch, distance, centerX, centerZ, mx, my)
 
   private fun pointerHit(mx: Int, my: Int, includeModelGroup: Boolean): NdsPointerHit? {
     val ground = pickRay(mx, my)?.let(::groundPoint)
