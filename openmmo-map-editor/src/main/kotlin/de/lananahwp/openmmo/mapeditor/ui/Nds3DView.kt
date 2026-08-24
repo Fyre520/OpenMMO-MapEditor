@@ -6,6 +6,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import java.awt.Component
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
@@ -35,6 +36,41 @@ data class NdsPointerHit(
     val shiftDown: Boolean = false,
     val ctrlDown: Boolean = false,
 )
+
+/**
+ * The top of [triangles] over each grid square, in world units, or NaN where nothing covers it.
+ *
+ * Fed the map's terrain alone rather than everything drawn: paint belongs to a square's ground,
+ * so a prop standing on that square must not lift it. Terrain is coarse (one quad can span many
+ * squares), so every square a triangle covers takes that triangle's height, not just the square
+ * holding its centroid — otherwise a large quad would leave every square but one without a
+ * surface. [groundY] and [scale] are the view transform's, so the result is directly comparable
+ * with the geometry as drawn.
+ */
+internal fun ndsTileSurfaceHeights(
+    triangles: List<NdsTri>,
+    cols: Int,
+    rows: Int,
+    groundY: Float,
+    scale: Float,
+): Array<DoubleArray> {
+  // NaN marks "no terrain here", so a square at world height 0 stays distinguishable from empty.
+  val out = Array(cols) { DoubleArray(rows) { Double.NaN } }
+  for (tri in triangles) {
+    val minX = floor(minOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
+    val maxX = floor(maxOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
+    val minZ = floor(minOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
+    val maxZ = floor(maxOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
+    val worldTop = (maxOf(tri.ay, tri.by, tri.cy) - groundY).toDouble() * scale
+    for (x in maxOf(0, minX)..minOf(cols - 1, maxX)) {
+      for (z in maxOf(0, minZ)..minOf(rows - 1, maxZ)) {
+        val current = out[x][z]
+        if (current.isNaN() || worldTop > current) out[x][z] = worldTop
+      }
+    }
+  }
+  return out
+}
 
 /** A picked model triangle plus the map-tile-space point where the pointer met it. */
 internal class NdsSurfaceHit(
@@ -363,6 +399,16 @@ private fun normalize3(v: DoubleArray): DoubleArray {
 interface Nds3DView {
   var grid: NdsGrid?
   var modelTriangles: List<NdsTri>
+
+  /**
+   * The geometry painted tiles rest on: the map's own terrain, without the props placed on it.
+   *
+   * Kept apart from [modelTriangles] -- which is everything drawn, terrain and props together --
+   * because paint belongs to the ground of a square. Resolving a tile's height against every
+   * triangle stood it on the roof of whatever prop happened to be there, so moving a prop over
+   * painted ground made the paint climb the prop instead of disappearing under it.
+   */
+  var surfaceTriangles: List<NdsTri>
   var modelTextures: Map<String, NdsTexture>
   var modelPalettes: Map<String, IntArray>
   var modelOpacity: Float

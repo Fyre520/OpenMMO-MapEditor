@@ -9,18 +9,28 @@ import de.lananahwp.openmmo.mapeditor.json.JsonParser
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 import de.lananahwp.openmmo.mapeditor.model.EditorMap
 import de.lananahwp.openmmo.mapeditor.model.MetatileBrush
+import de.lananahwp.openmmo.mapeditor.model.NdsCellEdit
+import de.lananahwp.openmmo.mapeditor.model.NdsCellKind
+import de.lananahwp.openmmo.mapeditor.model.NdsEditHistory
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGridStep
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
+import de.lananahwp.openmmo.mapeditor.model.NdsSceneSnapshot
+import de.lananahwp.openmmo.mapeditor.model.NdsSceneStep
+import de.lananahwp.openmmo.mapeditor.model.NdsUndoStep
 import de.lananahwp.openmmo.mapeditor.project.DecompProject
 import de.lananahwp.openmmo.mapeditor.project.NdsExporter
 import de.lananahwp.openmmo.mapeditor.project.NdsProject
 import de.lananahwp.openmmo.mapeditor.project.OpenmmoExporter
 import java.awt.BorderLayout
 import java.awt.CardLayout
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
 import java.awt.event.InputEvent
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
@@ -145,6 +155,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val redoStack = ArrayDeque<List<TileEdit>>()
   private val snapshotUndoStack = ArrayDeque<Pair<String, String>>()
   private val snapshotRedoStack = ArrayDeque<Pair<String, String>>()
+  // DS undo, kept apart from the GBA stacks above: the two editors share a window but never a
+  // map, so a step from one could not be applied to the other.
+  private val ndsHistory = NdsEditHistory()
+  /** The scene as it was when the current prop drag started. */
+  private var ndsDragSceneBefore: NdsSceneSnapshot? = null
   private var copiedEvent: CopiedEvent? = null
   private var copiedEvents: CopiedEvents? = null
   private val selectedEventMarkers = mutableSetOf<MapEventMarker>()
@@ -203,6 +218,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsLayerSpinner = JSpinner(SpinnerNumberModel(0, 0, NdsGrid.LAYERS - 1, 1))
   private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0, -32, 32, 1))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
+  /** Paint brush width in squares, for the four modes that write a square at a time. */
+  private val ndsTileBrushSpinner = JSpinner(SpinnerNumberModel(1, 1, 32, 1))
+  /**
+   * Whether a prop lands on whole map squares.
+   *
+   * Painting is always square-aligned; props are placed in continuous map coordinates, and a
+   * surface lifted off one square only lines back up with the grid at a whole coordinate.
+   */
+  private val ndsSnapToGridCheck = JCheckBox("Snap to grid", true)
   private val ndsPaintMode =
       JComboBox(arrayOf(
           "Tile",
@@ -572,6 +596,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsHeightSpinner.addChangeListener {
       view()?.activeHeight = (ndsHeightSpinner.value as Number).toInt()
     }
+    ndsTileBrushSpinner.preferredSize = Dimension(60, ndsTileBrushSpinner.preferredSize.height)
+    ndsTileBrushSpinner.toolTipText =
+        "How many squares across one click paints, centred on the square under the pointer"
+    ndsSnapToGridCheck.toolTipText =
+        "Place and drag props on whole map squares; painted tiles are always square-aligned"
     ndsCollisionValueSpinner.preferredSize = Dimension(60, ndsCollisionValueSpinner.preferredSize.height)
     ndsCollisionValueSpinner.addChangeListener {
       view()?.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
@@ -643,6 +672,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     toolbar.add(ndsLayerSpinner)
     toolbar.add(JLabel("Height:"))
     toolbar.add(ndsHeightSpinner)
+    toolbar.add(JLabel("Brush:"))
+    toolbar.add(ndsTileBrushSpinner)
     toolbar.add(JLabel("Mode:"))
     toolbar.add(ndsPaintMode)
     toolbar.add(JLabel("Value:"))
@@ -652,6 +683,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val terrainToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     terrainToolbar.add(ndsCollisionEditView)
     terrainToolbar.add(ndsClearCollisionWithTerrain)
+    terrainToolbar.add(ndsSnapToGridCheck)
     terrainToolbar.add(ndsRestoreTerrainButton)
     terrainToolbar.add(JLabel("  Middle drag rotates · Left click edits · Right drag pans · Wheel zooms"))
     val surfaceToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
@@ -684,6 +716,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { x, z -> paintNdsCell(x, z) },
             { x, z, value -> paintNdsCollision(x, z, value) },
             { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+            { x, z -> eraseNdsCell(x, z) },
+            { ndsHistory.beginStroke(ndsStrokeLabel()) },
         )
     val created =
         try {
@@ -691,12 +725,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { x, z -> paintNdsCell(x, z) },
               { x, z, value -> paintNdsCollision(x, z, value) },
               { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+              { x, z -> eraseNdsCell(x, z) },
+              { ndsHistory.beginStroke(ndsStrokeLabel()) },
           )
         } catch (t: Throwable) {
           System.out.println("[Nds] OpenGL view unavailable (${t.message}); using software renderer")
           software
         }
     ndsView = created
+    installNdsShortcuts(created.asComponent())
     ndsViewContainer.removeAll()
     ndsViewContainer.add(created.asComponent(), BorderLayout.CENTER)
     ndsViewContainer.revalidate()
@@ -1025,7 +1062,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val result = holder.project.importModel(map, modelChooser.selectedFile, textures)
       val v = view()
       if (v != null) {
-        v.modelTriangles = holder.project.trianglesFor(map)
+        val terrain = holder.project.trianglesFor(map)
+        v.surfaceTriangles = terrain
+        v.modelTriangles = terrain
         v.modelTextures = holder.project.texturesFor(map)
         v.modelPalettes = holder.project.palettesFor(map)
       }
@@ -1284,6 +1323,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     redoStack.clear()
     snapshotUndoStack.clear()
     snapshotRedoStack.clear()
+    ndsHistory.clear()
     selectedEventMarkers.clear()
     syncSelectedEvents()
     canvas.blockWidth = map.layout.width
@@ -1359,11 +1399,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     currentHolder = null
     currentMap = null
     currentRef = null
+    // History describes squares and props of the map it was recorded on, so it cannot carry over.
+    ndsHistory.clear()
+    ndsDragSceneBefore = null
     showMapCards(false)
     val v = view() ?: return
     v.grid = map.grid
     val tris = ref.holder.project.trianglesFor(map)
     val bld = ref.holder.project.buildingTrianglesFor(map)
+    v.surfaceTriangles = tris
     v.modelTriangles = if (bld.isEmpty()) tris else tris + bld
     v.modelTextures = ref.holder.project.texturesFor(map)
     v.modelPalettes = ref.holder.project.palettesFor(map)
@@ -1825,6 +1869,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun undo() {
+    // The DS editor keeps its own history; only one of the two maps is ever open.
+    if (currentNdsMap != null) {
+      undoNds()
+      return
+    }
     val map = currentMap ?: return
     if (undoStack.isNotEmpty()) {
       val edits = undoStack.removeLast()
@@ -1843,6 +1892,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun redo() {
+    if (currentNdsMap != null) {
+      redoNds()
+      return
+    }
     val map = currentMap ?: return
     if (redoStack.isNotEmpty()) {
       val edits = redoStack.removeLast()
@@ -2357,6 +2410,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     return when (ndsPaintMode.selectedIndex) {
       4 -> {
         if (!dragging) {
+          // The drag that is about to start undoes as one step, measured from here.
+          ndsDragSceneBefore = NdsSceneSnapshot.of(map)
+          ndsHistory.beginStroke(ndsStrokeLabel())
           val exactId = hit.modelGroup
               ?.takeIf { it.startsWith("prop:") }
               ?.removePrefix("prop:")
@@ -2401,10 +2457,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           val x = hit.groundX ?: hit.cellX?.plus(0.5f)
           val z = hit.groundZ ?: hit.cellZ?.plus(0.5f)
           if (prop != null && x != null && z != null) {
-            prop.x = x + ndsPropDragOffsetX
-            prop.z = z + ndsPropDragOffsetZ
+            prop.x = snapNdsCoord(x + ndsPropDragOffsetX)
+            prop.z = snapNdsCoord(z + ndsPropDragOffsetZ)
             ndsPropsPanel.refreshProps(prop.id)
             markDirty()
+            ndsDragSceneBefore?.let {
+              ndsHistory.recordSceneDrag("move prop", it, NdsSceneSnapshot.of(map))
+            }
             refreshNdsPropGeometry(refreshTextures = false)
           } else {
             val terrainGroup = selectedNdsTerrainGroup
@@ -2416,10 +2475,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
                 project.moveTerrainObject(
                     map,
                     terrainGroup,
-                    ndsTerrainDragInitialOffsetX + x - startX,
-                    ndsTerrainDragInitialOffsetZ + z - startZ,
+                    snapNdsCoord(ndsTerrainDragInitialOffsetX + x - startX),
+                    snapNdsCoord(ndsTerrainDragInitialOffsetZ + z - startZ),
                 )) {
               markDirty()
+              ndsDragSceneBefore?.let {
+                ndsHistory.recordSceneDrag("move scenery", it, NdsSceneSnapshot.of(map))
+              }
               refreshNdsPropGeometry(refreshTextures = false)
               status.text = "Moved terrain scenery; collision remains unchanged"
             }
@@ -2545,6 +2607,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   /** Enables the per-mode extras and drops selection state that no longer applies. */
   private fun onNdsPaintModeChanged() {
     val surfaceMode = ndsPaintMode.selectedIndex == 6
+    // The first four modes are the ones that write a square at a time.
+    ndsTileBrushSpinner.isEnabled = ndsPaintMode.selectedIndex in 0..3
     ndsSurfaceBrushSpinner.isEnabled = surfaceMode
     ndsSurfaceSameTexture.isEnabled = surfaceMode
     ndsSurfaceCut.isEnabled = surfaceMode
@@ -2559,6 +2623,14 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       status.text =
           "Pick Surface: click the map squares you want, then Save selection as prop... " +
               "(drag paints, Shift+drag boxes, Ctrl removes)"
+    } else if (ndsPaintMode.selectedIndex == 0) {
+      status.text =
+          "Tile: drag paints the selected tile, Ctrl+drag clears the square, " +
+              "Brush sets how many squares wide · Ctrl+Z undoes a stroke"
+    } else if (ndsPaintMode.selectedIndex == 3) {
+      status.text =
+          "Height: drag raises squares to the set height, Ctrl+drag returns them to 0 " +
+              "· Ctrl+Z undoes a stroke"
     }
   }
 
@@ -2694,92 +2766,98 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun removeNdsSceneryObjectAt(hit: NdsPointerHit) {
-    val map = currentNdsMap ?: return
-    val holder = currentNdsHolder ?: return
-    val propId = hit.modelGroup
-        ?.takeIf { it.startsWith("prop:") }
-        ?.removePrefix("prop:")
-    if (propId != null) {
-      val removal = holder.project.removePropObject(
-          map, propId, ndsClearCollisionWithTerrain.isSelected) ?: return
-      selectedNdsPropId = null
-      selectedNdsTerrainGroup = null
-      ndsPropsPanel.refreshProps(null)
+    recordNdsSceneChange("remove scenery") {
+      val map = currentNdsMap ?: return
+      val holder = currentNdsHolder ?: return
+      val propId = hit.modelGroup
+          ?.takeIf { it.startsWith("prop:") }
+          ?.removePrefix("prop:")
+      if (propId != null) {
+        val removal = holder.project.removePropObject(
+            map, propId, ndsClearCollisionWithTerrain.isSelected) ?: return
+        selectedNdsPropId = null
+        selectedNdsTerrainGroup = null
+        ndsPropsPanel.refreshProps(null)
+        markDirty()
+        refreshNdsPropGeometry(refreshTextures = false)
+        val removed = removal.removedProp!!
+        val cleared = removal.clearedCollision.size
+        status.text = if (cleared > 0) {
+          "Removed scenery prop ${removed.modelKey.substringAfter(':')} and cleared $cleared collision tile(s)"
+        } else {
+          "Removed scenery prop ${removed.modelKey.substringAfter(':')}; collision unchanged"
+        }
+        return
+      }
+      val exact = hit.modelGroup?.let { holder.project.terrainObject(map, it) }
+      val x = hit.cellX
+      val z = hit.cellZ
+      val selection = exact ?: if (x != null && z != null) {
+        holder.project.terrainObjectAt(map, x + 0.5f, z + 0.5f)
+      } else null
+      if (selection == null) {
+        status.text = "No separate scenery object found here"
+        return
+      }
+      val removal = holder.project.removeTerrainObject(
+          map,
+          selection,
+          ndsClearCollisionWithTerrain.isSelected,
+      ) ?: return
       markDirty()
       refreshNdsPropGeometry(refreshTextures = false)
-      val removed = removal.removedProp!!
       val cleared = removal.clearedCollision.size
       status.text = if (cleared > 0) {
-        "Removed scenery prop ${removed.modelKey.substringAfter(':')} and cleared $cleared collision tile(s)"
+        "Removed terrain object (${selection.triangleCount} triangles) and cleared $cleared collision tile(s)"
       } else {
-        "Removed scenery prop ${removed.modelKey.substringAfter(':')}; collision unchanged"
+        "Removed terrain object (${selection.triangleCount} triangles); collision unchanged"
       }
-      return
-    }
-    val exact = hit.modelGroup?.let { holder.project.terrainObject(map, it) }
-    val x = hit.cellX
-    val z = hit.cellZ
-    val selection = exact ?: if (x != null && z != null) {
-      holder.project.terrainObjectAt(map, x + 0.5f, z + 0.5f)
-    } else null
-    if (selection == null) {
-      status.text = "No separate scenery object found here"
-      return
-    }
-    val removal = holder.project.removeTerrainObject(
-        map,
-        selection,
-        ndsClearCollisionWithTerrain.isSelected,
-    ) ?: return
-    markDirty()
-    refreshNdsPropGeometry(refreshTextures = false)
-    val cleared = removal.clearedCollision.size
-    status.text = if (cleared > 0) {
-      "Removed terrain object (${selection.triangleCount} triangles) and cleared $cleared collision tile(s)"
-    } else {
-      "Removed terrain object (${selection.triangleCount} triangles); collision unchanged"
     }
   }
 
   private fun restoreLastNdsTerrainObject() {
-    val map = currentNdsMap ?: return
-    val holder = currentNdsHolder ?: return
-    val restored = holder.project.restoreLastTerrainObject(map)
-    if (restored == null) {
-      status.text = "There are no removed scenery objects to restore"
-      return
+    recordNdsSceneChange("restore scenery") {
+      val map = currentNdsMap ?: return
+      val holder = currentNdsHolder ?: return
+      val restored = holder.project.restoreLastTerrainObject(map)
+      if (restored == null) {
+        status.text = "There are no removed scenery objects to restore"
+        return
+      }
+      restored.removedProp?.let { prop ->
+        selectedNdsPropId = prop.id
+        selectedNdsTerrainGroup = null
+        ndsPropsPanel.refreshProps(prop.id)
+      } ?: run {
+        selectedNdsTerrainGroup = restored.groupId.takeIf { it.isNotEmpty() }
+      }
+      markDirty()
+      refreshNdsPropGeometry(refreshTextures = restored.removedProp != null)
+      status.text = "Restored the last scenery object and its previous collision values"
     }
-    restored.removedProp?.let { prop ->
-      selectedNdsPropId = prop.id
-      selectedNdsTerrainGroup = null
-      ndsPropsPanel.refreshProps(prop.id)
-    } ?: run {
-      selectedNdsTerrainGroup = restored.groupId.takeIf { it.isNotEmpty() }
-    }
-    markDirty()
-    refreshNdsPropGeometry(refreshTextures = restored.removedProp != null)
-    status.text = "Restored the last scenery object and its previous collision values"
   }
 
   private fun beginNdsPropPlacement(modelKey: String) {
-    val map = currentNdsMap ?: return
-    val holder = currentNdsHolder ?: return
-    try {
-      val prop = holder.project.createProp(
-          modelKey,
-          map.grid.cols / 2f,
-          map.grid.rows / 2f,
-      )
-      map.props += prop
-      selectedNdsPropId = prop.id
-      ndsPropsPanel.refreshProps(prop.id)
-      ndsPaintMode.selectedIndex = 4
-      refreshNdsPropGeometry(refreshTextures = true)
-      markDirty()
-      status.text = "Placed ${modelKey.substringAfter(':')} at the map center — drag it to move"
-    } catch (t: Throwable) {
-      JOptionPane.showMessageDialog(
-          this, t.message ?: t.toString(), "Place prop failed", JOptionPane.ERROR_MESSAGE)
+    recordNdsSceneChange("place prop") {
+      val map = currentNdsMap ?: return
+      val holder = currentNdsHolder ?: return
+      try {
+        val prop = holder.project.createProp(
+            modelKey,
+            snapNdsCoord(map.grid.cols / 2f),
+            snapNdsCoord(map.grid.rows / 2f),
+        )
+        map.props += prop
+        selectedNdsPropId = prop.id
+        ndsPropsPanel.refreshProps(prop.id)
+        ndsPaintMode.selectedIndex = 4
+        refreshNdsPropGeometry(refreshTextures = true)
+        markDirty()
+        status.text = "Placed ${modelKey.substringAfter(':')} at the map center — drag it to move"
+      } catch (t: Throwable) {
+        JOptionPane.showMessageDialog(
+            this, t.message ?: t.toString(), "Place prop failed", JOptionPane.ERROR_MESSAGE)
+      }
     }
   }
 
@@ -2833,31 +2911,35 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun removeSelectedNdsProp() {
-    val map = currentNdsMap ?: return
-    val holder = currentNdsHolder ?: return
-    val id = selectedNdsPropId ?: return
-    val removal = holder.project.removePropObject(
-        map, id, ndsClearCollisionWithTerrain.isSelected) ?: return
-    val removed = removal.removedProp ?: return
-    selectedNdsPropId = null
-    selectedNdsTerrainGroup = null
-    ndsPropsPanel.refreshProps(null)
-    markDirty()
-    refreshNdsPropGeometry(refreshTextures = false)
-    status.text = "Removed prop ${removed.modelKey.substringAfter(':')}"
+    recordNdsSceneChange("remove prop") {
+      val map = currentNdsMap ?: return
+      val holder = currentNdsHolder ?: return
+      val id = selectedNdsPropId ?: return
+      val removal = holder.project.removePropObject(
+          map, id, ndsClearCollisionWithTerrain.isSelected) ?: return
+      val removed = removal.removedProp ?: return
+      selectedNdsPropId = null
+      selectedNdsTerrainGroup = null
+      ndsPropsPanel.refreshProps(null)
+      markDirty()
+      refreshNdsPropGeometry(refreshTextures = false)
+      status.text = "Removed prop ${removed.modelKey.substringAfter(':')}"
+    }
   }
 
   private fun duplicateSelectedNdsProp() {
-    val map = currentNdsMap ?: return
-    val holder = currentNdsHolder ?: return
-    val source = map.props.firstOrNull { it.id == selectedNdsPropId } ?: return
-    val duplicate = holder.project.duplicateProp(source)
-    map.props += duplicate
-    selectedNdsPropId = duplicate.id
-    ndsPropsPanel.refreshProps(duplicate.id)
-    markDirty()
-    refreshNdsPropGeometry(refreshTextures = false)
-    status.text = "Duplicated prop; drag it into place"
+    recordNdsSceneChange("duplicate prop") {
+      val map = currentNdsMap ?: return
+      val holder = currentNdsHolder ?: return
+      val source = map.props.firstOrNull { it.id == selectedNdsPropId } ?: return
+      val duplicate = holder.project.duplicateProp(source)
+      map.props += duplicate
+      selectedNdsPropId = duplicate.id
+      ndsPropsPanel.refreshProps(duplicate.id)
+      markDirty()
+      refreshNdsPropGeometry(refreshTextures = false)
+      status.text = "Duplicated prop; drag it into place"
+    }
   }
 
   private fun onNdsPropTransformChanged() {
@@ -2872,6 +2954,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val v = view() ?: return
     val terrain = holder.project.trianglesFor(map)
     val props = holder.project.buildingTrianglesFor(map)
+    // Painted tiles follow the terrain only, so props moving around never carry the paint with
+    // them; the view still draws and picks against everything.
+    v.surfaceTriangles = terrain
     v.modelTriangles = terrain + props
     if (refreshTextures) {
       // Re-merges the project tile textures, which this would otherwise drop.
@@ -2883,14 +2968,176 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.asComponent().repaint()
   }
 
+  // ---- DS undo --------------------------------------------------------------
+
+  /**
+   * Binds undo/redo on the 3D view itself.
+   *
+   * The OpenGL view is a heavyweight AWT canvas, and Swing menu accelerators are not reliably
+   * delivered while one of those holds focus -- which it does from the first click on the map, so
+   * the Edit menu's Ctrl+Z would be dead exactly while someone is painting. Binding the keys on
+   * the component cannot shadow a text field's own Ctrl+Z either, because it only fires while the
+   * view has focus.
+   */
+  private fun installNdsShortcuts(component: Component) {
+    component.isFocusable = true
+    component.addMouseListener(object : MouseAdapter() {
+      override fun mousePressed(e: MouseEvent) {
+        component.requestFocusInWindow()
+      }
+    })
+    component.addKeyListener(object : KeyAdapter() {
+      override fun keyPressed(e: KeyEvent) {
+        if (!e.isControlDown) return
+        when (e.keyCode) {
+          // Ctrl+Shift+Z redoes as well, which is what most editors answer to.
+          KeyEvent.VK_Z -> if (e.isShiftDown) redo() else undo()
+          KeyEvent.VK_Y -> redo()
+          else -> return
+        }
+        e.consume()
+      }
+    })
+  }
+
+  /** Names a stroke after the mode that painted it, for the status line. */
+  private fun ndsStrokeLabel(): String =
+      when (ndsPaintMode.selectedIndex) {
+        1 -> "collision"
+        2 -> "permission"
+        3 -> "height"
+        else -> "tile"
+      }
+
+  /**
+   * Runs a prop or scenery change and records what it did.
+   *
+   * Inline so the wrapped block can bail out with `return`, which these methods do freely --
+   * several of them return in the middle *after* changing the scene. That is why the snapshot is
+   * taken in a `finally`: a non-local return would jump straight past a plain trailing
+   * comparison, and the change would go unrecorded and stay unundoable. Anything that leaves the
+   * scene as it found it records nothing, so a bail-out costs only the comparison.
+   */
+  private inline fun recordNdsSceneChange(label: String, act: () -> Unit) {
+    val map = currentNdsMap ?: return
+    val before = NdsSceneSnapshot.of(map)
+    try {
+      act()
+    } finally {
+      ndsHistory.recordScene(label, before, NdsSceneSnapshot.of(map))
+    }
+  }
+
+  /**
+   * Rounds a map-tile coordinate onto the grid while Snap to grid is on.
+   *
+   * Whole coordinates are the alignment that matters: tile space is one unit per square, so a
+   * surface lifted off a square only lines back up with the grid at a whole coordinate.
+   */
+  private fun snapNdsCoord(value: Float): Float =
+      if (ndsSnapToGridCheck.isSelected) kotlin.math.round(value) else value
+
+  private fun undoNds() {
+    val map = currentNdsMap ?: return
+    val step = ndsHistory.undo(map)
+    if (step == null) {
+      status.text = "Nothing left to undo"
+      return
+    }
+    afterNdsHistoryStep(map, step, undone = true)
+  }
+
+  private fun redoNds() {
+    val map = currentNdsMap ?: return
+    val step = ndsHistory.redo(map)
+    if (step == null) {
+      status.text = "Nothing left to redo"
+      return
+    }
+    afterNdsHistoryStep(map, step, undone = false)
+  }
+
+  /** Redraws whatever the step it was handed touched, and says what happened. */
+  private fun afterNdsHistoryStep(map: NdsMap, step: NdsUndoStep, undone: Boolean) {
+    val verb = if (undone) "Undid" else "Redid"
+    when (step) {
+      is NdsGridStep -> {
+        view()?.asComponent()?.repaint()
+        status.text = "$verb ${step.edits.size} ${step.label} edit(s)"
+      }
+      is NdsSceneStep -> {
+        // The selection can name a prop that no longer exists on this side of the step.
+        if (map.props.none { it.id == selectedNdsPropId }) selectedNdsPropId = null
+        selectedNdsTerrainGroup = null
+        ndsPropsPanel.refreshProps(selectedNdsPropId)
+        // Textures too: a prop coming back needs the ones it was drawn with re-merged.
+        refreshNdsPropGeometry(refreshTextures = true)
+        status.text = "$verb ${step.label}"
+      }
+    }
+    markDirty()
+  }
+
+  /**
+   * The squares one click paints, centred on the square under the pointer.
+   *
+   * Shares [NdsProject.surfaceBrushCells] with the surface picker's brush so the two size and
+   * centre identically -- including for even sizes, where the clicked square has to stay inside
+   * the brush.
+   */
+  private fun ndsBrushCells(grid: NdsGrid, x: Int, z: Int): List<Pair<Int, Int>> {
+    val size = (ndsTileBrushSpinner.value as Number).toInt()
+    val cells =
+        if (size <= 1) listOf(x to z)
+        else NdsProject.surfaceBrushCells(x + 0.5f, z + 0.5f, size)
+            .map { NdsProject.surfaceCellX(it) to NdsProject.surfaceCellZ(it) }
+    return cells.filter { (cx, cz) -> cx in 0 until grid.cols && cz in 0 until grid.rows }
+  }
+
   private fun paintNdsCell(x: Int, z: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     val layer = view.activeLayer
-    if (ndsPaintMode.selectedIndex == 3) {
-      map.grid.setHeight(layer, x, z, view.activeHeight)
-    } else {
-      map.grid.setTile(layer, x, z, view.activeTile)
+    val height = ndsPaintMode.selectedIndex == 3
+    for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
+      if (height) {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.HEIGHT, layer, cx, cz,
+            map.grid.heightAt(layer, cx, cz), view.activeHeight.coerceIn(-32, 32)))
+        map.grid.setHeight(layer, cx, cz, view.activeHeight)
+      } else {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.TILE, layer, cx, cz,
+            map.grid.tileAt(layer, cx, cz), view.activeTile))
+        map.grid.setTile(layer, cx, cz, view.activeTile)
+      }
+    }
+    markDirty()
+    view.asComponent().repaint()
+  }
+
+  /**
+   * Ctrl+click/drag in Tile or Height mode: empties the square on the active layer.
+   *
+   * Painting can only ever overwrite one tile index with another, so without this a square that
+   * was painted by mistake stayed painted for the life of the map.
+   */
+  private fun eraseNdsCell(x: Int, z: Int) {
+    val map = currentNdsMap ?: return
+    val view = view() ?: return
+    val layer = view.activeLayer
+    val height = ndsPaintMode.selectedIndex == 3
+    for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
+      if (height) {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.HEIGHT, layer, cx, cz, map.grid.heightAt(layer, cx, cz), 0))
+        map.grid.setHeight(layer, cx, cz, 0)
+      } else {
+        // -1 is the grid's own empty value, the same one a fresh map starts every square at.
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.TILE, layer, cx, cz, map.grid.tileAt(layer, cx, cz), -1))
+        map.grid.setTile(layer, cx, cz, -1)
+      }
     }
     markDirty()
     view.asComponent().repaint()
@@ -2899,10 +3146,19 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun paintNdsCollision(x: Int, z: Int, value: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
-    if (ndsPaintMode.selectedIndex == 2) {
-      map.grid.setPermission(x, z, value)
-    } else {
-      map.grid.setCollision(x, z, value)
+    val permission = ndsPaintMode.selectedIndex == 2
+    // Both grids store a byte, so record what the setter will actually keep.
+    val masked = value and 0xFF
+    for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
+      if (permission) {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.PERMISSION, 0, cx, cz, map.grid.permissionAt(cx, cz), masked))
+        map.grid.setPermission(cx, cz, value)
+      } else {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.COLLISION, 0, cx, cz, map.grid.collisionAt(cx, cz), masked))
+        map.grid.setCollision(cx, cz, value)
+      }
     }
     markDirty()
     view.asComponent().repaint()

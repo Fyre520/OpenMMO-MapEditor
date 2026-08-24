@@ -56,6 +56,12 @@ tasks.register<JavaExec>("glTest") {
     )
 }
 
+tasks.register<JavaExec>("ndsHistoryTest") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsHistoryTestKt")
+}
+
 tasks.register<JavaExec>("surfaceExtractionTest") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath
@@ -103,4 +109,30 @@ tasks.register<JavaExec>("surfaceDiagnostic") {
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.SurfaceDiagnosticKt")
   args(projectDir.parentFile.absolutePath, providers.gradleProperty("map").getOrElse("MAP_NATIONAL_PARK"))
+}
+
+tasks.register<JavaExec>("lumiSceneExport") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.LumiSceneExportKt")
+  args(
+      projectDir.parentFile.absolutePath,
+      providers.gradleProperty("map").getOrElse("MAP_ROUTE_1"),
+      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("lumi-scene").get().asFile.absolutePath))
+}
+
+tasks.register<JavaExec>("spriteDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.core.NdsSpriteDiagnosticKt")
+  args(providers.gradleProperty("rom").getOrElse(""))
+}
+
+tasks.register<JavaExec>("playerSpriteExport") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.core.NdsPlayerSpriteExportKt")
+  args(
+      providers.gradleProperty("rom").getOrElse(""),
+      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("player-sprites").get().asFile.absolutePath))
 }

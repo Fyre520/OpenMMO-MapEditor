@@ -623,7 +623,10 @@ object NdsNsbmd {
     val matPalname =
         model.paletteDefs.firstOrNull { poly.matId in it.palmatid }?.palname
             ?: mat?.palname ?: ""
-    var currentColor = mat?.diffuseColor ?: 0xFFFFFFFF.toInt()
+    val materialAlpha = ((mat?.alpha ?: 31) * 255 + 15) / 31
+    var currentColor =
+        ((materialAlpha and 0xFF) shl 24) or
+            ((mat?.diffuseColor ?: 0xFFFFFFFF.toInt()) and 0x00FFFFFF)
     val matScaleS = mat?.scaleS ?: 1f
     val matScaleT = mat?.scaleT ?: 1f
     val matRepeatS = mat?.repeatS == 1
@@ -685,7 +688,11 @@ object NdsNsbmd {
           val r = (rgb shr 0) and 0x1F
           val g = (rgb shr 5) and 0x1F
           val b = (rgb shr 10) and 0x1F
-          currentColor = 0xFF000000.toInt() or ((r * 255 / 31) shl 16) or ((g * 255 / 31) shl 8) or (b * 255 / 31)
+          currentColor =
+              (currentColor and 0xFF000000.toInt()) or
+                  ((r * 255 / 31) shl 16) or
+                  ((g * 255 / 31) shl 8) or
+                  (b * 255 / 31)
         }
         0x21 -> reader.skip(4)
         0x22 -> {

@@ -27,6 +27,15 @@ class NdsGlMapView(
     private val onPaintCell: (x: Int, z: Int) -> Unit,
     private val onPaintCollision: (x: Int, z: Int, value: Int) -> Unit,
     private val onCellInteraction: (hit: NdsPointerHit, dragging: Boolean) -> Boolean = { _, _ -> false },
+    /** Ctrl+click/drag in a paint mode: clear this cell rather than paint the active brush into it. */
+    private val onEraseCell: (x: Int, z: Int) -> Unit = { _, _ -> },
+    /**
+     * A paint gesture is starting (press, before the first cell is painted).
+     *
+     * Lets the editor group everything a press-drag-release paints into one undo step, which a
+     * per-cell callback cannot do: it never learns where one stroke ends and the next begins.
+     */
+    private val onStrokeBegin: () -> Unit = {},
 ) : GLCanvas(GLCapabilities(GLProfile.get(GLProfile.GL2))), GLEventListener, Nds3DView {
 
   enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
@@ -90,8 +99,16 @@ class NdsGlMapView(
     set(value) {
       field = value
       modelXformCache = null
-      // The per-square surface heights are derived from these triangles and the transform they
-      // produce, so both caches have to fall together.
+      // The per-square surface heights are derived from the transform these triangles produce,
+      // so that cache has to fall with this one.
+      tileSurfaceCache = null
+      repaint()
+    }
+
+  override var surfaceTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      // These are what the per-square heights are measured from.
       tileSurfaceCache = null
       repaint()
     }
@@ -135,7 +152,8 @@ class NdsGlMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = true)
               if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ)
+                onStrokeBegin()
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -171,7 +189,7 @@ class NdsGlMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = false)
               if (hit == null) return
               if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ)
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -190,12 +208,14 @@ class NdsGlMapView(
     }
   }
 
-  private fun paint(x: Int, z: Int) {
+  private fun paint(x: Int, z: Int, erase: Boolean) {
     when (paintMode) {
-      PaintMode.TILE -> onPaintCell(x, z)
+      // Ctrl is the erase modifier for the two modes that write a cell's own contents: it takes
+      // the tile back out of the square, or drops its height back to the map floor.
+      PaintMode.TILE -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
-      PaintMode.ELEVATION -> onPaintCell(x, z)
+      PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
     }
   }
 
@@ -317,33 +337,14 @@ class NdsGlMapView(
   }
 
   /**
-   * The top of the map's own geometry over each grid square, in world units, or null where the
-   * square has no terrain over it.
-   *
-   * Rebuilt whenever the model changes. Terrain is coarse (one quad can span many squares), so
-   * every square a triangle covers takes that triangle's height, not just the square holding its
-   * centroid — otherwise a large quad would leave every square but one without a surface.
+   * Per-square terrain heights (see [ndsTileSurfaceHeights]), held between frames and dropped
+   * whenever [surfaceTriangles] or the transform they produce changes.
    */
   private var tileSurfaceCache: Array<DoubleArray>? = null
 
   private fun tileSurfaceHeights(g: NdsGrid, xf: ModelXform): Array<DoubleArray> {
     tileSurfaceCache?.let { return it }
-    // NaN marks "no terrain here", so a square at world height 0 stays distinguishable from empty.
-    val out = Array(g.cols) { DoubleArray(g.rows) { Double.NaN } }
-    for (tri in modelTriangles) {
-      val minX = kotlin.math.floor(minOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
-      val maxX = kotlin.math.floor(maxOf(tri.ax, tri.bx, tri.cx).toDouble()).toInt()
-      val minZ = kotlin.math.floor(minOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
-      val maxZ = kotlin.math.floor(maxOf(tri.az, tri.bz, tri.cz).toDouble()).toInt()
-      val top = maxOf(tri.ay, tri.by, tri.cy)
-      val worldTop = (top - xf.groundY).toDouble() * xf.scale
-      for (x in maxOf(0, minX)..minOf(g.cols - 1, maxX)) {
-        for (z in maxOf(0, minZ)..minOf(g.rows - 1, maxZ)) {
-          val current = out[x][z]
-          if (current.isNaN() || worldTop > current) out[x][z] = worldTop
-        }
-      }
-    }
+    val out = ndsTileSurfaceHeights(surfaceTriangles, g.cols, g.rows, xf.groundY, xf.scale)
     tileSurfaceCache = out
     return out
   }

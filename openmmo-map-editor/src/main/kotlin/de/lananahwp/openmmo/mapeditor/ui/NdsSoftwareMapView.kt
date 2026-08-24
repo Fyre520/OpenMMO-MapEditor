@@ -32,6 +32,15 @@ class NdsSoftwareMapView(
     private val onPaintCell: (x: Int, z: Int) -> Unit,
     private val onPaintCollision: (x: Int, z: Int, value: Int) -> Unit,
     private val onCellInteraction: (hit: NdsPointerHit, dragging: Boolean) -> Boolean = { _, _ -> false },
+    /** Ctrl+click/drag in a paint mode: clear this cell rather than paint the active brush into it. */
+    private val onEraseCell: (x: Int, z: Int) -> Unit = { _, _ -> },
+    /**
+     * A paint gesture is starting (press, before the first cell is painted).
+     *
+     * Lets the editor group everything a press-drag-release paints into one undo step, which a
+     * per-cell callback cannot do: it never learns where one stroke ends and the next begins.
+     */
+    private val onStrokeBegin: () -> Unit = {},
 ) : JPanel(), Nds3DView {
 
   enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
@@ -122,6 +131,12 @@ class NdsSoftwareMapView(
       repaint()
     }
 
+  /**
+   * Terrain without the props on it. Carried for the interface only: this view draws painted
+   * tiles at grid height rather than following the map surface, so it never measures against it.
+   */
+  override var surfaceTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+
   /** Textures (by name) used by the model triangles. */
   override var modelTextures: Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture> = emptyMap()
   override var modelPalettes: Map<String, IntArray> = emptyMap()
@@ -159,7 +174,8 @@ class NdsSoftwareMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = true)
               if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ)
+                onStrokeBegin()
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -196,7 +212,7 @@ class NdsSoftwareMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = false)
               if (hit == null) return
               if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ)
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -215,12 +231,14 @@ class NdsSoftwareMapView(
     }
   }
 
-  private fun paint(x: Int, z: Int) {
+  private fun paint(x: Int, z: Int, erase: Boolean) {
     when (paintMode) {
-      PaintMode.TILE -> onPaintCell(x, z)
+      // Ctrl is the erase modifier for the two modes that write a cell's own contents: it takes
+      // the tile back out of the square, or drops its height back to the map floor.
+      PaintMode.TILE -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
-      PaintMode.ELEVATION -> onPaintCell(x, z)
+      PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
     }
   }
 

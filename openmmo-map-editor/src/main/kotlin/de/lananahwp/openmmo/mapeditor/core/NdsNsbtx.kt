@@ -147,6 +147,8 @@ object NdsNsbtx {
     }
   }
 
+  internal fun parseStrict(bytes: ByteArray): NdsNsbtxPack = parsePackInner(bytes)
+
   internal class NdsNsbtxPack(val textures: List<NdsTexture>, val palettes: Map<String, IntArray>)
 
   private fun parsePackInner(bytes: ByteArray): NdsNsbtxPack {

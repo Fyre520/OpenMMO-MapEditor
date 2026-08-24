@@ -3,7 +3,11 @@ package de.lananahwp.openmmo.mapeditor
 import de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot
 import de.lananahwp.openmmo.mapeditor.core.NdsTexture
 import de.lananahwp.openmmo.mapeditor.core.NdsTri
+import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import de.lananahwp.openmmo.mapeditor.project.NdsProject
+import de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView
+import de.lananahwp.openmmo.mapeditor.ui.ndsTileSurfaceHeights
+import java.awt.event.MouseEvent
 import java.io.File
 import java.nio.file.Files
 
@@ -23,6 +27,8 @@ fun main(args: Array<String>) {
   testRecentring()
   testSnapshotRoundTrip()
   testCustomTiles()
+  testPaintedTilesRestOnTerrainOnly()
+  testCtrlErasesAPaintedSquare()
 
   // The end-to-end pass needs a real map to lift geometry off, so it only runs when the decomp
   // (and its ROM) are present locally, matching how the other ROM-dependent checks are gated.
@@ -228,6 +234,78 @@ private fun testEndToEndExtraction(decompRoot: File) {
   } finally {
     catalogRoot.deleteRecursively()
   }
+}
+
+
+/**
+ * Painted tiles follow the map's terrain, never the props standing on it.
+ *
+ * Measuring the surface over everything drawn put paint on top of whatever prop happened to cover
+ * the square: painting under a tree lifted the tile into the canopy, and dragging a prop across
+ * painted ground carried the paint up with it instead of hiding it.
+ */
+private fun testPaintedTilesRestOnTerrainOnly() {
+  val terrain = listOf(tileTri(2, 2), tileTri(3, 2), tileTri(2, 3), tileTri(3, 3))
+  // A prop standing on square (2, 2): well above the floor, and only over that one square.
+  val prop = tileTri(2, 2, y = 8f, texture = "tree")
+
+  val onTerrain = ndsTileSurfaceHeights(terrain, cols = 8, rows = 8, groundY = 0f, scale = 1f)
+  check(onTerrain[2][2] == 0.0) { "terrain floor should be 0, got ${onTerrain[2][2]}" }
+  check(onTerrain[7][7].isNaN()) { "a square with no terrain over it should stay empty" }
+
+  // The whole point: adding the prop must not move the square the paint sits on.
+  val withProp = ndsTileSurfaceHeights(terrain + prop, cols = 8, rows = 8, groundY = 0f, scale = 1f)
+  check(withProp[2][2] == 8.0) { "sanity: measuring the prop too should reach its top" }
+  check(onTerrain[2][2] != withProp[2][2]) { "the two passes must differ, or this proves nothing" }
+
+  // groundY is the transform's floor, so heights come back relative to it and scaled.
+  val scaled = ndsTileSurfaceHeights(terrain, cols = 8, rows = 8, groundY = -2f, scale = 0.5f)
+  check(scaled[2][2] == 1.0) { "expected (0 - -2) * 0.5, got ${scaled[2][2]}" }
+}
+
+/**
+ * Ctrl+click in Tile mode empties a square instead of painting it.
+ *
+ * Painting could only ever overwrite one tile index with another, so a square painted by mistake
+ * stayed painted for the life of the map.
+ */
+private fun testCtrlErasesAPaintedSquare() {
+  val grid = NdsGrid(32, 32)
+  val painted = mutableListOf<Pair<Int, Int>>()
+  val erased = mutableListOf<Pair<Int, Int>>()
+  val view = NdsSoftwareMapView(
+      { x, z ->
+        painted += x to z
+        grid.setTile(0, x, z, 5)
+      },
+      { _, _, _ -> },
+      { _, _ -> false },
+      { x, z ->
+        erased += x to z
+        grid.setTile(0, x, z, -1)
+      },
+  ).apply {
+    this.grid = grid
+    setPaintMode(0)
+    setSize(800, 600)
+  }
+
+  fun press(ctrl: Boolean) {
+    val modifiers = if (ctrl) MouseEvent.CTRL_DOWN_MASK else 0
+    val event = MouseEvent(
+        view, MouseEvent.MOUSE_PRESSED, 1L, modifiers, 400, 300, 1, false, MouseEvent.BUTTON1)
+    view.mouseListeners.forEach { it.mousePressed(event) }
+  }
+
+  press(ctrl = false)
+  check(painted.size == 1) { "a plain click should paint exactly one square, got ${painted.size}" }
+  val (x, z) = painted.single()
+  check(grid.tileAt(0, x, z) == 5) { "the square was not painted" }
+
+  press(ctrl = true)
+  check(erased == listOf(x to z)) { "Ctrl+click should erase the same square, got $erased" }
+  check(painted.size == 1) { "Ctrl+click must not paint as well" }
+  check(grid.tileAt(0, x, z) == -1) { "the square should be empty again" }
 }
 
 /** A flat unit-square-ish triangle sitting on tile (x, z) at height y. */

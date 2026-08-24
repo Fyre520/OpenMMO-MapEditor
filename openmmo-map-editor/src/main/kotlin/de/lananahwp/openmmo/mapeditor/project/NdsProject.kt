@@ -1,6 +1,9 @@
 package de.lananahwp.openmmo.mapeditor.project
 
 import de.lananahwp.openmmo.mapeditor.core.Gen4Decomp
+import de.lananahwp.openmmo.mapeditor.core.NdsTileset
+import de.lananahwp.openmmo.mapeditor.core.NdsTri
+import de.lananahwp.openmmo.mapeditor.core.TileShape
 import de.lananahwp.openmmo.mapeditor.json.Json
 import de.lananahwp.openmmo.mapeditor.json.JsonParser
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
@@ -17,9 +20,22 @@ import de.lananahwp.openmmo.mapeditor.model.NdsTerrainTransform
 import de.lananahwp.openmmo.mapeditor.model.NdsTrigger
 import de.lananahwp.openmmo.mapeditor.model.NdsWarp
 import java.io.File
+import java.awt.Color
+import kotlin.math.floor
 
 /** A Gen 4 DS map project backed by a decomp (and optionally a matching ROM). */
 class NdsProject(val rootDir: File) {
+  /**
+   * Where this project keeps the editor's own files: custom maps, props, imported models and grid
+   * overrides.
+   *
+   * Overridable for the same reason [NdsCustomTileStore.rootDir] is: a test that persists
+   * anything must be able to point somewhere throwaway. Everything a user has built with the
+   * editor lives under here, so a test writing into a real decomp -- let alone cleaning up after
+   * itself by removing this directory -- destroys work that has nothing to do with it.
+   */
+  var overrideRoot: File = File(rootDir, ".openmmo")
+
   /** 1 DS map-model unit = 4 tiles (map cells are ~8 units per 32x32 tile cell). */
   private val TILE_SCALE = 4f
 
@@ -1279,6 +1295,170 @@ class NdsProject(val rootDir: File) {
     return editablePropTriangles(map)
   }
 
+  /** Built-in Tile-mode paint, baked into the same map-space geometry as the ROM terrain. */
+  fun builtInTileTrianglesFor(map: NdsMap): List<NdsTri> {
+    val surface = tileSurfaceHeights(map)
+    val out = ArrayList<NdsTri>()
+    for (layer in 0 until NdsGrid.LAYERS) {
+      for (x in 0 until map.grid.cols) for (z in 0 until map.grid.rows) {
+        val tile = map.grid.tileAt(layer, x, z)
+        if (tile < 0 || NdsTileset.isCustom(tile)) continue
+        val def = NdsTileset.tiles.getOrNull(tile) ?: continue
+        val ground = surface[x][z].takeUnless(Float::isNaN) ?: 0f
+        val base = ground + map.grid.heightAt(layer, x, z)
+        val top = shadeTileColor(def.topColor, layer)
+        when (def.shape) {
+          TileShape.FLAT ->
+              addTileQuad(
+                  out,
+                  x.toFloat(),
+                  base + 0.01f,
+                  z.toFloat(),
+                  (x + 1).toFloat(),
+                  base + 0.01f,
+                  (z + 1).toFloat(),
+                  top,
+              )
+          TileShape.CUBE, TileShape.BLOCK -> {
+            val x0 = x.toFloat()
+            val x1 = (x + 1).toFloat()
+            val z0 = z.toFloat()
+            val z1 = (z + 1).toFloat()
+            val y1 = base + def.height
+            addTileQuad(out, x0, y1, z0, x1, y1, z1, top)
+            val side = shadeTileColor(def.sideColor, layer)
+            addTileQuad(out, x0, base, z0, x1, y1, z0, side)
+            addTileQuad(out, x0, base, z1, x1, y1, z1, side)
+            addTileQuad(out, x0, base, z0, x0, y1, z1, side)
+            addTileQuad(out, x1, base, z0, x1, y1, z1, side)
+          }
+        }
+      }
+    }
+    return out
+  }
+
+  /** Matches the editor's per-cell terrain lookup, but keeps values in exported map space. */
+  private fun tileSurfaceHeights(map: NdsMap): Array<FloatArray> {
+    val out = Array(map.grid.cols) { FloatArray(map.grid.rows) { Float.NaN } }
+    for (tri in trianglesFor(map)) {
+      val minX = maxOf(0, floor(minOf(tri.ax, tri.bx, tri.cx)).toInt())
+      val maxX = minOf(map.grid.cols - 1, floor(maxOf(tri.ax, tri.bx, tri.cx)).toInt())
+      val minZ = maxOf(0, floor(minOf(tri.az, tri.bz, tri.cz)).toInt())
+      val maxZ = minOf(map.grid.rows - 1, floor(maxOf(tri.az, tri.bz, tri.cz)).toInt())
+      if (minX > maxX || minZ > maxZ) continue
+      val top = maxOf(tri.ay, tri.by, tri.cy)
+      for (x in minX..maxX) for (z in minZ..maxZ) {
+        if (out[x][z].isNaN() || top > out[x][z]) out[x][z] = top
+      }
+    }
+    return out
+  }
+
+  private fun shadeTileColor(color: Color, layer: Int): Int {
+    val shade = 1f - layer * 0.06f
+    return Color(
+            (color.red * shade).toInt().coerceIn(0, 255),
+            (color.green * shade).toInt().coerceIn(0, 255),
+            (color.blue * shade).toInt().coerceIn(0, 255),
+        )
+        .rgb
+  }
+
+  /** Adds a horizontal or vertical quad described by two opposite corners. */
+  private fun addTileQuad(
+      out: MutableList<NdsTri>,
+      x0: Float,
+      y0: Float,
+      z0: Float,
+      x1: Float,
+      y1: Float,
+      z1: Float,
+      color: Int,
+  ) {
+    val vertices =
+        when {
+          y0 == y1 -> arrayOf(floatArrayOf(x0, y0, z0), floatArrayOf(x1, y0, z0), floatArrayOf(x1, y1, z1), floatArrayOf(x0, y1, z1))
+          z0 == z1 -> arrayOf(floatArrayOf(x0, y0, z0), floatArrayOf(x1, y0, z0), floatArrayOf(x1, y1, z1), floatArrayOf(x0, y1, z1))
+          else -> arrayOf(floatArrayOf(x0, y0, z0), floatArrayOf(x0, y0, z1), floatArrayOf(x1, y1, z1), floatArrayOf(x1, y1, z0))
+        }
+    fun triangle(a: FloatArray, b: FloatArray, c: FloatArray) =
+        NdsTri(
+            a[0], a[1], a[2],
+            b[0], b[1], b[2],
+            c[0], c[1], c[2],
+            color,
+            0f, 0f, 0f, 0f, 0f, 0f,
+        )
+    out += triangle(vertices[0], vertices[1], vertices[2])
+    out += triangle(vertices[0], vertices[2], vertices[3])
+  }
+
+  /** Painted shared-library tiles, positioned exactly as the editor's 3D views position them. */
+  fun customTileTrianglesFor(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    val geometry = NdsCustomTileStore.viewGeometry()
+    if (geometry.isEmpty()) return emptyList()
+    val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+    for (layer in 0 until de.lananahwp.openmmo.mapeditor.model.NdsGrid.LAYERS) {
+      for (x in 0 until map.grid.cols) for (z in 0 until map.grid.rows) {
+        val tile = map.grid.tileAt(layer, x, z)
+        if (!de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(tile)) continue
+        val base = map.grid.heightAt(layer, x, z).toFloat()
+        for (triangle in geometry[tile].orEmpty()) {
+          out +=
+              triangle.copy(
+                  ax = x + triangle.ax,
+                  ay = base + triangle.ay,
+                  az = z + triangle.az,
+                  bx = x + triangle.bx,
+                  by = base + triangle.by,
+                  bz = z + triangle.bz,
+                  cx = x + triangle.cx,
+                  cy = base + triangle.cy,
+                  cz = z + triangle.cz,
+              )
+        }
+      }
+    }
+    return out
+  }
+
+  /** Baked texture data belonging to the custom tiles actually painted on this map. */
+  fun customTileTexturesFor(
+      map: NdsMap,
+  ): Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture> {
+    val used = usedCustomTiles(map)
+    return buildMap {
+      for (index in used) {
+        val prefix = NdsCustomTileStore.texturePrefix(index)
+        for ((name, texture) in NdsCustomTileStore.mesh(index)?.textures.orEmpty()) {
+          put(prefix + name, texture)
+        }
+      }
+    }
+  }
+
+  fun customTilePalettesFor(map: NdsMap): Map<String, IntArray> {
+    val used = usedCustomTiles(map)
+    return buildMap {
+      for (index in used) {
+        val prefix = NdsCustomTileStore.texturePrefix(index)
+        for ((name, palette) in NdsCustomTileStore.mesh(index)?.palettes.orEmpty()) {
+          put(prefix + name, palette)
+        }
+      }
+    }
+  }
+
+  private fun usedCustomTiles(map: NdsMap): Set<Int> = buildSet {
+    for (layer in 0 until de.lananahwp.openmmo.mapeditor.model.NdsGrid.LAYERS) {
+      for (x in 0 until map.grid.cols) for (z in 0 until map.grid.rows) {
+        map.grid.tileAt(layer, x, z).takeIf(
+            de.lananahwp.openmmo.mapeditor.core.NdsTileset::isCustom)?.let(::add)
+      }
+    }
+  }
+
   private fun editablePropTriangles(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
     val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
     for (prop in map.props) {
@@ -1496,7 +1676,7 @@ class NdsProject(val rootDir: File) {
 
   // ---- Persistence ---------------------------------------------------------
 
-  private fun overrideDir(): File = File(rootDir, ".openmmo/nds")
+  private fun overrideDir(): File = File(overrideRoot, "nds")
 
   private fun safeName(name: String): String = name.replace(Regex("[^A-Za-z0-9_.-]"), "_")
 

@@ -15,6 +15,7 @@ import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import java.io.File
+import java.nio.file.Files
 import java.util.Base64
 
 fun main(args: Array<String>) {
@@ -312,12 +313,23 @@ fun main(args: Array<String>) {
     check(route1.grid.collisionAt(4, 4) == 0x80)
 
     // Grid persistence round-trips to the project override file.
-    ndsProject.saveGrid(route1)
-    val overrideFile = File(hgRoot, ".openmmo/nds/MAP_ROUTE_1.json")
-    check(overrideFile.isFile)
-    check(overrideFile.readText().contains("\"layer_0\""))
-    overrideFile.delete()
-    File(hgRoot, ".openmmo").deleteRecursively()
+    //
+    // Pointed at a throwaway directory, never the decomp's own: this is somebody's real project,
+    // and .openmmo under it holds the custom maps, props and tiles they have built. This check
+    // used to save into that directory and then delete the whole of it to tidy up, which quietly
+    // destroyed all of that work on every run of the smoke test.
+    val overrideRoot = Files.createTempDirectory("openmmo-smoke-overrides-").toFile()
+    val projectOverrides = ndsProject.overrideRoot
+    ndsProject.overrideRoot = overrideRoot
+    try {
+      ndsProject.saveGrid(route1)
+      val overrideFile = File(overrideRoot, "nds/MAP_ROUTE_1.json")
+      check(overrideFile.isFile)
+      check(overrideFile.readText().contains("\"layer_0\""))
+    } finally {
+      ndsProject.overrideRoot = projectOverrides
+      overrideRoot.deleteRecursively()
+    }
     println("  grid persistence round-trip OK")
 
     val exporter = NdsExporter(ndsProject)
