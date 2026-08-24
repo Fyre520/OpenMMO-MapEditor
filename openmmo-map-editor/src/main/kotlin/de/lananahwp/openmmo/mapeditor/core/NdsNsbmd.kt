@@ -101,6 +101,7 @@ internal class NdsNsbmdMaterial {
   var flipT = 0
   var diffuseColor = 0xFFFFFFFF.toInt()
   var alpha = 31
+  var cullMode = 3
   var width = 8
   var height = 8
   var scaleS = 1f
@@ -144,6 +145,8 @@ data class NdsTri(
     val repeatT: Boolean = false,
     val flipS: Boolean = false,
     val flipT: Boolean = false,
+    /** Nitro GXCull value: 0 all, 1 front, 2 back, 3 none. */
+    val cullMode: Int = 3,
     /** Stable editor-side terrain component identifier; empty for ordinary decoded models. */
     val editGroup: String = "",
 )
@@ -193,6 +196,10 @@ object NdsNsbmd {
     val factor = if (worldScale) model.modelScale / 64f else 1f
     val out = mutableListOf<NdsTri>()
     for (poly in model.polygons) {
+      // SBC NODE commands carry the authored object visibility used by Nitro at draw time.
+      // Indoor land models include enclosing/editor-only shells which must not be emitted when
+      // their owning node is hidden.
+      if (poly.jointId in model.objects.indices && !model.objects[poly.jointId].visible) continue
       for (t in decodePolygon(poly, model)) {
         if (factor == 1f) {
           out += t
@@ -353,6 +360,7 @@ object NdsNsbmd {
       mat.height = 8 shl ((texImageParam shr 7) and 7)
       mat.diffuseColor = bgr15ToColor(unknown1 and 0x7FFF)
       mat.alpha = (unknown3 shr 16) and 31
+      mat.cullMode = (unknown3 shr 6) and 3
       mat.format = (texImageParam shr 10) and 7
       mat.width = matWidth
       mat.height = matHeight
@@ -633,6 +641,7 @@ object NdsNsbmd {
     val matRepeatT = mat?.repeatT == 1
     val matFlipS = mat?.flipS == 1
     val matFlipT = mat?.flipT == 1
+    val matCullMode = mat?.cullMode ?: 3
     var currentUv = floatArrayOf(0f, 0f)
     // Persistent local-space last vertex (DSPRE's vtx_state): survives primitive (0x41)
     // boundaries so relative vertex commands keep the correct base.
@@ -765,6 +774,7 @@ object NdsNsbmd {
               matRepeatT,
               matFlipS,
               matFlipT,
+              matCullMode,
           )
           points.clear(); colors.clear(); uvs.clear()
         }
@@ -807,6 +817,7 @@ object NdsNsbmd {
       repeatT: Boolean,
       flipS: Boolean,
       flipT: Boolean,
+      cullMode: Int,
   ) {
     fun uv(i: Int): FloatArray = uvs.getOrElse(i) { floatArrayOf(0f, 0f) }
     fun tri(i: Int, j: Int, k: Int) {
@@ -825,6 +836,7 @@ object NdsNsbmd {
               repeatT,
               flipS,
               flipT,
+              cullMode,
           ))
     }
     when (typ) {

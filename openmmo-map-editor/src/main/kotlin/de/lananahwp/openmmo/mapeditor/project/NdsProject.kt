@@ -24,7 +24,7 @@ import java.awt.Color
 import kotlin.math.floor
 
 /** A Gen 4 DS map project backed by a decomp (and optionally a matching ROM). */
-class NdsProject(val rootDir: File) {
+class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
   /**
    * Where this project keeps the editor's own files: custom maps, props, imported models and grid
    * overrides.
@@ -608,6 +608,7 @@ class NdsProject(val rootDir: File) {
 
   private fun discoverRom(): de.lananahwp.openmmo.mapeditor.core.NdsRom? {
     val candidates = mutableListOf<File>()
+    explicitRomFile?.canonicalFile?.let(candidates::add)
     var dir: File? = rootDir
     repeat(7) {
       val d = dir ?: return@repeat
@@ -2279,6 +2280,11 @@ class NdsProject(val rootDir: File) {
       ))
 
   private fun populatePropsFromRom(map: NdsMap) {
+    // HGSS map types 4 and 5 are interiors. Their land-data building section is not consumed as
+    // field props by the indoor scene; treating it like an outdoor cell injects the surrounding
+    // New Bark building/sky set over otherwise-correct room terrain.
+    if (family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.HEART_GOLD &&
+        map.header.mapType in setOf(4, 5)) return
     val cells = resolveCells(map)
     if (cells.isEmpty()) return
     val (minX, minY, _, _) = footprint(cells)

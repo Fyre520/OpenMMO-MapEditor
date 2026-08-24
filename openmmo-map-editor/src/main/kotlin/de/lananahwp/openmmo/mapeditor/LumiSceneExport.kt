@@ -11,8 +11,14 @@ import javax.imageio.ImageIO
 
 /** Resolves one map against the user's local ROM into an uncommitted renderer-neutral cache. */
 fun main(args: Array<String>) {
-  require(args.size == 3) { "Usage: LumiSceneExport DECOMP_ROOT MAP_NAME OUTPUT_DIRECTORY" }
-  val project = NdsProject(File(args[0]).canonicalFile)
+  require(args.size in 3..4) {
+    "Usage: LumiSceneExport DECOMP_ROOT MAP_NAME OUTPUT_DIRECTORY [READ_ONLY_ROM]"
+  }
+  val project =
+      NdsProject(
+          File(args[0]).canonicalFile,
+          args.getOrNull(3)?.let(::File),
+      )
   require(project.hasRom) { "A matching read-only NDS ROM is required under the editor project" }
   val map = requireNotNull(project.loadMap(args[1])) { "Unknown NDS map ${args[1]}" }
   val output = File(args[2]).canonicalFile.also(File::mkdirs)
@@ -31,6 +37,15 @@ fun main(args: Array<String>) {
   val materials = keys.mapIndexedNotNull { index, key ->
     materialJson(index, key, textures, palettes, texturesDir)
   }
+  val eventOrigin =
+      if (map.isCustom) {
+        0 to 0
+      } else {
+        project.resolveCells(map).let { cells ->
+          if (cells.isEmpty()) 0 to 0
+          else cells.minOf { it.cellX } * 32 to cells.minOf { it.cellY } * 32
+        }
+      }
   val root =
       obj(
           "schemaVersion" to num(1),
@@ -46,6 +61,28 @@ fun main(args: Array<String>) {
           "cameraType" to num(map.header.cameraType),
           "collisions" to arr(gridValues(map.grid.cols, map.grid.rows, map.grid::collisionAt)),
           "permissions" to arr(gridValues(map.grid.cols, map.grid.rows, map.grid::permissionAt)),
+          "warps" to
+              arr(
+                  map.events.warps.mapIndexedNotNull { sourceIndex, warp ->
+                    val destination = project.loadMap(warp.header) ?: return@mapIndexedNotNull null
+                    val localX = warp.x - eventOrigin.first
+                    val localZ = warp.z - eventOrigin.second
+                    require(localX in 0 until map.grid.cols && localZ in 0 until map.grid.rows) {
+                      "Warp " + sourceIndex + " on " + map.name +
+                          " resolves outside its local grid: source=(" + warp.x + "," + warp.z +
+                          "), origin=" + eventOrigin + ", local=(" + localX + "," + localZ +
+                          "), grid=" + map.grid.cols + "x" + map.grid.rows
+                    }
+                    obj(
+                        "sourceIndex" to num(sourceIndex),
+                        "x" to num(localX),
+                        "z" to num(localZ),
+                        "destinationRegionId" to num(project.family.romType),
+                        "destinationBankId" to num(destination.mapId and 0xFF),
+                        "destinationMapId" to num(destination.mapId ushr 8),
+                        "destinationWarp" to num(warp.anchor),
+                    )
+                  }),
           "materials" to arr(materials),
           "triangles" to
               arr(
@@ -109,6 +146,7 @@ private fun triangleJson(triangle: NdsTri, materialId: Int): Json.JObj =
         "repeatT" to Json.JBool(triangle.repeatT),
         "flipS" to Json.JBool(triangle.flipS),
         "flipT" to Json.JBool(triangle.flipT),
+        "cullMode" to num(triangle.cullMode),
     )
 
 private fun num(value: Number): Json.JNum = Json.JNum(value.toDouble())

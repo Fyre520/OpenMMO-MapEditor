@@ -12,6 +12,7 @@ dependencies {
   implementation("org.jogamp.jogl:jogl-all:2.6.0:natives-windows-amd64")
   implementation("org.jogamp.gluegen:gluegen-rt:2.6.0")
   implementation("org.jogamp.gluegen:gluegen-rt:2.6.0:natives-windows-amd64")
+  testImplementation(kotlin("test"))
 }
 
 kotlin {
@@ -116,9 +117,10 @@ tasks.register<JavaExec>("lumiSceneExport") {
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.LumiSceneExportKt")
   args(
-      projectDir.parentFile.absolutePath,
+      providers.gradleProperty("decomp").getOrElse(projectDir.parentFile.resolve("decomp/pokeheartgold").absolutePath),
       providers.gradleProperty("map").getOrElse("MAP_ROUTE_1"),
       providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("lumi-scene").get().asFile.absolutePath))
+  providers.gradleProperty("rom").orNull?.takeIf(String::isNotBlank)?.let { args(it) }
 }
 
 tasks.register<JavaExec>("spriteDiagnostic") {
