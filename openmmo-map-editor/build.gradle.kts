@@ -130,6 +130,16 @@ tasks.register<JavaExec>("lumiSceneExport") {
   providers.gradleProperty("rom").orNull?.takeIf(String::isNotBlank)?.let { args(it) }
 }
 
+tasks.register<JavaExec>("lumiSceneBatchExport") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.LumiSceneBatchExportKt")
+  args(
+      providers.gradleProperty("decomp").getOrElse(projectDir.parentFile.resolve("decomp/pokeheartgold").absolutePath),
+      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("lumi-scenes").get().asFile.absolutePath))
+  providers.gradleProperty("rom").orNull?.takeIf(String::isNotBlank)?.let { args(it) }
+}
+
 tasks.register<JavaExec>("spriteDiagnostic") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath

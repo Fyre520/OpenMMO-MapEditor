@@ -1,5 +1,6 @@
 package de.lananahwp.openmmo.mapeditor
 
+import de.lananahwp.openmmo.mapeditor.core.Gen4Decomp
 import de.lananahwp.openmmo.mapeditor.core.NdsTexture
 import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.json.Json
@@ -19,9 +20,23 @@ fun main(args: Array<String>) {
           File(args[0]).canonicalFile,
           args.getOrNull(3)?.let(::File),
       )
+  exportLumiScene(project, args[1], File(args[2]))
+}
+
+/** Shares one read-only ROM project across single-map and batch derived-cache exports. */
+internal fun exportLumiScene(project: NdsProject, mapName: String, outputDirectory: File): File {
+  return exportLumiScene(project, mapName, outputDirectory, lumiWorldMatrixCells(project))
+}
+
+internal fun exportLumiScene(
+    project: NdsProject,
+    mapName: String,
+    outputDirectory: File,
+    worldMatrixCells: List<Gen4Decomp.MatrixCell>,
+): File {
   require(project.hasRom) { "A matching read-only NDS ROM is required under the editor project" }
-  val map = requireNotNull(project.loadMap(args[1])) { "Unknown NDS map ${args[1]}" }
-  val output = File(args[2]).canonicalFile.also(File::mkdirs)
+  val map = requireNotNull(project.loadMap(mapName)) { "Unknown NDS map $mapName" }
+  val output = outputDirectory.canonicalFile.also(File::mkdirs)
   val texturesDir = File(output, "textures").also(File::mkdirs)
   val triangles =
       project.trianglesFor(map) +
@@ -46,6 +61,9 @@ fun main(args: Array<String>) {
           else cells.minOf { it.cellX } * 32 to cells.minOf { it.cellY } * 32
         }
       }
+  val connections =
+      if (map.isCustom || map.header.matrixId != 0) emptyList()
+      else deriveLumiConnections(map.mapId, worldMatrixCells)
   val root =
       obj(
           "schemaVersion" to num(1),
@@ -83,6 +101,19 @@ fun main(args: Array<String>) {
                         "destinationWarp" to num(warp.anchor),
                     )
                   }),
+          "connections" to
+              arr(
+                  connections.map { connection ->
+                    obj(
+                        "edge" to str(connection.edge),
+                        "sourceStart" to num(connection.sourceStart),
+                        "length" to num(connection.length),
+                        "destinationRegionId" to num(project.family.romType),
+                        "destinationBankId" to num(connection.destinationMapId and 0xFF),
+                        "destinationMapId" to num(connection.destinationMapId ushr 8),
+                        "destinationStart" to num(connection.destinationStart),
+                    )
+                  }),
           "materials" to arr(materials),
           "triangles" to
               arr(
@@ -90,10 +121,93 @@ fun main(args: Array<String>) {
                     triangleJson(it, materialIds[it.texture to it.palette] ?: -1)
                   }),
       )
-  File(output, "scene.json").writeText(JsonWriter.writePretty(root) + "\n", Charsets.UTF_8)
+  val sceneFile = File(output, "scene.json")
+  sceneFile.writeText(JsonWriter.writePretty(root) + "\n", Charsets.UTF_8)
   println(
       "Exported ${map.displayName}: ${triangles.size} triangles, " +
           "${materials.size} materials -> ${output.path}")
+  return sceneFile
+}
+
+/** Reads the ROM's header-bearing main matrix instead of relying on decomp directory conventions. */
+internal fun lumiWorldMatrixCells(project: NdsProject): List<Gen4Decomp.MatrixCell> =
+    project.mapNames
+        .asSequence()
+        .mapNotNull(project::loadMap)
+        .filter { !it.isCustom && it.header.matrixId == 0 }
+        .flatMap { map ->
+          project.resolveCells(map).asSequence().map { cell ->
+            Gen4Decomp.MatrixCell(cell.cellX, cell.cellY, map.mapId)
+          }
+        }
+        .distinctBy { it.x to it.y }
+        .toList()
+
+internal data class LumiConnection(
+    val edge: String,
+    val sourceStart: Int,
+    val length: Int,
+    val destinationMapId: Int,
+    val destinationStart: Int,
+)
+
+/**
+ * Converts the ROM's main-world matrix adjacency into authoritative boundary segments. Each matrix
+ * cell is 32 tiles. Door/cave transitions remain ROM event warps; this only describes walking over
+ * the outer edge of an exterior map footprint.
+ */
+internal fun deriveLumiConnections(
+    sourceMapId: Int,
+    cells: List<Gen4Decomp.MatrixCell>,
+): List<LumiConnection> {
+  val source = cells.filter { it.mapId == sourceMapId }
+  if (source.isEmpty()) return emptyList()
+  val byPosition = cells.associateBy { it.x to it.y }
+  val cellsByMap = cells.groupBy { it.mapId }
+  val minX = source.minOf { it.x }
+  val maxX = source.maxOf { it.x }
+  val minY = source.minOf { it.y }
+  val maxY = source.maxOf { it.y }
+  val raw = mutableListOf<LumiConnection>()
+
+  fun add(sourceCell: Gen4Decomp.MatrixCell, edge: String, dx: Int, dy: Int) {
+    val destination = byPosition[sourceCell.x + dx to sourceCell.y + dy] ?: return
+    if (destination.mapId == sourceMapId || destination.mapId == 0 || destination.mapId == 0xFFFF) {
+      return
+    }
+    val destinationCells = cellsByMap[destination.mapId].orEmpty()
+    if (destinationCells.isEmpty()) return
+    val horizontal = edge == "UP" || edge == "DOWN"
+    val sourceStart =
+        if (horizontal) (sourceCell.x - minX) * 32 else (sourceCell.y - minY) * 32
+    val destinationStart =
+        if (horizontal) {
+          (destination.x - destinationCells.minOf { it.x }) * 32
+        } else {
+          (destination.y - destinationCells.minOf { it.y }) * 32
+        }
+    raw += LumiConnection(edge, sourceStart, 32, destination.mapId, destinationStart)
+  }
+
+  source.filter { it.y == minY }.forEach { add(it, "UP", 0, -1) }
+  source.filter { it.y == maxY }.forEach { add(it, "DOWN", 0, 1) }
+  source.filter { it.x == minX }.forEach { add(it, "LEFT", -1, 0) }
+  source.filter { it.x == maxX }.forEach { add(it, "RIGHT", 1, 0) }
+
+  return raw.sortedWith(compareBy(LumiConnection::edge, LumiConnection::sourceStart)).fold(
+      mutableListOf()) { merged, next ->
+        val previous = merged.lastOrNull()
+        if (previous != null &&
+            previous.edge == next.edge &&
+            previous.destinationMapId == next.destinationMapId &&
+            previous.sourceStart + previous.length == next.sourceStart &&
+            previous.destinationStart + previous.length == next.destinationStart) {
+          merged[merged.lastIndex] = previous.copy(length = previous.length + next.length)
+        } else {
+          merged += next
+        }
+        merged
+      }
 }
 
 private fun gridValues(cols: Int, rows: Int, value: (Int, Int) -> Int): List<Json> =
