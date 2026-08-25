@@ -21,6 +21,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsUndoStep
 import de.lananahwp.openmmo.mapeditor.project.DecompProject
 import de.lananahwp.openmmo.mapeditor.project.NdsExporter
 import de.lananahwp.openmmo.mapeditor.project.NdsProject
+import de.lananahwp.openmmo.mapeditor.project.NdsPropLibrary
 import de.lananahwp.openmmo.mapeditor.project.OpenmmoExporter
 import java.awt.BorderLayout
 import java.awt.CardLayout
@@ -62,6 +63,7 @@ import javax.swing.JToolBar
 import javax.swing.JTree
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
+import javax.swing.SwingWorker
 import javax.swing.DefaultListModel
 import javax.swing.JSpinner
 import javax.swing.SpinnerNumberModel
@@ -285,24 +287,32 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var ndsSurfaceLastY: Float? = null
   private var ndsSurfaceErasing = false
 
+  /** Multi-selection plus the primary prop whose transform is shown in the sidebar. */
+  private val selectedNdsPropIds = LinkedHashSet<String>()
   private var selectedNdsPropId: String? = null
   private var selectedNdsTerrainGroup: String? = null
   private var ndsPropDragOffsetX = 0f
   private var ndsPropDragOffsetZ = 0f
+  private var ndsPropDragStartPositions = emptyMap<String, Pair<Float, Float>>()
   private var ndsTerrainDragStartX: Float? = null
   private var ndsTerrainDragStartZ: Float? = null
   private var ndsTerrainDragInitialOffsetX = 0f
   private var ndsTerrainDragInitialOffsetZ = 0f
+  private val ndsPropLibraries = HashMap<de.lananahwp.openmmo.mapeditor.core.NdsFamily, NdsPropLibrary>()
+  private val ndsPropLibrariesLoading = HashSet<de.lananahwp.openmmo.mapeditor.core.NdsFamily>()
+  private var showAllNdsProps = false
   private val ndsPropsPanel = NdsPropsPanel(
       onImport = { importNdsPropModel() },
       onPlace = { beginNdsPropPlacement(it) },
-      onPreview = { key ->
-        currentNdsHolder?.project?.propModelPreview(key, currentNdsMap)
-            ?: NdsProject.PropModelPreview(emptyList(), emptyMap(), emptyMap())
-      },
-      onSelect = { selectNdsProp(it) },
+      onPreview = { info -> previewNdsProp(info) },
+      onSelect = { ids, primary -> selectNdsProps(ids, primary) },
       onRemove = { removeSelectedNdsProp() },
       onDuplicate = { duplicateSelectedNdsProp() },
+      onMerge = { mergeSelectedNdsProps() },
+      onShowAllNdsPropsChanged = {
+        showAllNdsProps = it
+        rebuildNdsPropCatalog()
+      },
       onChanged = { onNdsPropTransformChanged() },
   )
 
@@ -1138,7 +1148,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     )?.trim() ?: return
     try {
       val imported = holder.project.importPropModel(label, modelChooser.selectedFile, textureFile)
-      ndsPropsPanel.setModels(holder.project.propModels())
+      rebuildNdsPropCatalog()
       ndsPropsPanel.selectModel(imported.key)
       status.text = "Imported prop model ${imported.label}; click Place, then click the map"
     } catch (t: Throwable) {
@@ -1441,12 +1451,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     refreshNdsTileCombo()
     ndsHeaderPanel.setMap(map)
     ndsEventsPanel.setMap(map)
+    selectedNdsPropIds.clear()
     selectedNdsPropId = null
     selectedNdsTerrainGroup = null
     // A surface selection names squares on the map it was picked from, so it cannot carry over.
     clearNdsSurfaceSelection()
     v.surfacePicking = ndsPaintMode.selectedIndex == 6
-    ndsPropsPanel.setModels(ref.holder.project.propModels())
+    rebuildNdsPropCatalog()
     ndsPropsPanel.setMap(map)
     refreshNdsMarkers()
     dirty = false
@@ -1482,11 +1493,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     for (b in map.events.bgEvents) {
       markers += NdsEventMarker(b.x, b.z, "S", java.awt.Color(220, 165, 30, 200))
     }
-    map.props.firstOrNull { it.id == selectedNdsPropId }?.let { prop ->
+    for (prop in map.props.filter { it.id in selectedNdsPropIds }) {
       markers += NdsEventMarker(
           kotlin.math.floor(prop.x).toInt(),
           kotlin.math.floor(prop.z).toInt(),
-          "PROP",
+          if (prop.id == selectedNdsPropId) "PROP" else "PROP+",
           java.awt.Color(255, 210, 40, 230),
       )
     }
@@ -2453,12 +2464,24 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               if (exactId == null && hit.modelGroup != null) {
                 currentNdsHolder?.project?.terrainObject(map, hit.modelGroup)
               } else null
-          if (terrainSelection != null) {
+          val clickedId = exactId ?: footprintProp?.id
+          if (terrainSelection != null && !hit.ctrlDown) {
             selectNdsTerrainObject(terrainSelection.groupId)
-          } else {
-            selectNdsProp(exactId ?: footprintProp?.id)
+          } else if (clickedId != null) {
+            if (hit.ctrlDown) {
+              val next = LinkedHashSet(selectedNdsPropIds)
+              if (!next.add(clickedId)) next.remove(clickedId)
+              selectNdsProps(next, clickedId.takeIf { it in next } ?: next.lastOrNull())
+            } else {
+              selectNdsProp(clickedId)
+            }
+          } else if (!hit.ctrlDown) {
+            selectNdsProp(null)
           }
           val selected = map.props.firstOrNull { it.id == selectedNdsPropId }
+          ndsPropDragStartPositions = map.props
+              .filter { it.id in selectedNdsPropIds }
+              .associate { it.id to (it.x to it.z) }
           if (selected != null && cx != null && cz != null) {
             // Keep the grabbed point under the cursor instead of snapping a large prop's origin.
             ndsPropDragOffsetX = selected.x - cx
@@ -2483,12 +2506,20 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           val x = hit.groundX ?: hit.cellX?.plus(0.5f)
           val z = hit.groundZ ?: hit.cellZ?.plus(0.5f)
           if (prop != null && x != null && z != null) {
-            prop.x = snapNdsCoord(x + ndsPropDragOffsetX)
-            prop.z = snapNdsCoord(z + ndsPropDragOffsetZ)
-            ndsPropsPanel.refreshProps(prop.id)
+            val start = ndsPropDragStartPositions[prop.id] ?: (prop.x to prop.z)
+            val targetX = snapNdsCoord(x + ndsPropDragOffsetX)
+            val targetZ = snapNdsCoord(z + ndsPropDragOffsetZ)
+            val dx = targetX - start.first
+            val dz = targetZ - start.second
+            for (selected in map.props.filter { it.id in selectedNdsPropIds }) {
+              val initial = ndsPropDragStartPositions[selected.id] ?: continue
+              selected.x = initial.first + dx
+              selected.z = initial.second + dz
+            }
+            ndsPropsPanel.refreshProps(selectedNdsPropIds, selectedNdsPropId)
             markDirty()
             ndsDragSceneBefore?.let {
-              ndsHistory.recordSceneDrag("move prop", it, NdsSceneSnapshot.of(map))
+              ndsHistory.recordSceneDrag("move ${selectedNdsPropIds.size} prop(s)", it, NdsSceneSnapshot.of(map))
             }
             refreshNdsPropGeometry(refreshTextures = false)
           } else {
@@ -2818,7 +2849,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     if (label.isNullOrEmpty()) return
     try {
       val saved = holder.project.saveExtractedProp(label, snapshot, map.name)
-      ndsPropsPanel.setModels(holder.project.propModels())
+      rebuildNdsPropCatalog()
       ndsPropsPanel.selectModel(saved.key)
       status.text =
           "Saved '${saved.label}' (${snapshot.triangles.size} triangles) to the prop catalog — " +
@@ -2839,9 +2870,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (propId != null) {
         val removal = holder.project.removePropObject(
             map, propId, ndsClearCollisionWithTerrain.isSelected) ?: return
-        selectedNdsPropId = null
+        selectedNdsPropIds.remove(propId)
+        selectedNdsPropId = selectedNdsPropIds.lastOrNull()
         selectedNdsTerrainGroup = null
-        ndsPropsPanel.refreshProps(null)
+        ndsPropsPanel.refreshProps(selectedNdsPropIds, selectedNdsPropId)
         markDirty()
         refreshNdsPropGeometry(refreshTextures = false)
         val removed = removal.removedProp!!
@@ -2889,6 +2921,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         return
       }
       restored.removedProp?.let { prop ->
+        selectedNdsPropIds.clear(); selectedNdsPropIds += prop.id
         selectedNdsPropId = prop.id
         selectedNdsTerrainGroup = null
         ndsPropsPanel.refreshProps(prop.id)
@@ -2901,23 +2934,88 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
-  private fun beginNdsPropPlacement(modelKey: String) {
+  private fun previewNdsProp(info: NdsProject.PropModelInfo): NdsProject.PropModelPreview {
+    val current = currentNdsHolder?.project
+    val foreign = info.sourceFamily?.takeIf { current != null && it != current.family }
+    return if (foreign == null) {
+      current?.propModelPreview(info.sourceModelKey, currentNdsMap)
+          ?: NdsProject.PropModelPreview(emptyList(), emptyMap(), emptyMap())
+    } else {
+      ndsPropLibraries[foreign]?.preview(info)
+          ?: NdsProject.PropModelPreview(emptyList(), emptyMap(), emptyMap())
+    }
+  }
+
+  private fun rebuildNdsPropCatalog() {
+    val current = currentNdsHolder?.project ?: return
+    val models = current.propModels().toMutableList()
+    if (showAllNdsProps) {
+      val otherFamily = de.lananahwp.openmmo.mapeditor.core.NdsFamily.entries
+          .firstOrNull { it != current.family }
+      val source = ndsHolders.values.map { it.project }
+          .firstOrNull { it.family == otherFamily }
+      if (otherFamily != null && otherFamily !in ndsPropLibraries && source == null) {
+        NdsPropLibrary.loadCached(otherFamily)?.let { ndsPropLibraries[otherFamily] = it }
+      }
+      models += ndsPropLibraries.values
+          .filter { it.family != current.family }
+          .flatMap { it.models }
+      if (source != null && source.family !in ndsPropLibraries &&
+          ndsPropLibrariesLoading.add(source.family)) {
+        status.text = "Building ${source.family.displayName} prop cache in the background..."
+        object : SwingWorker<NdsPropLibrary, Unit>() {
+          override fun doInBackground(): NdsPropLibrary = NdsPropLibrary.loadOrBuild(source.rootDir)
+          override fun done() {
+            ndsPropLibrariesLoading.remove(source.family)
+            try {
+              val library = get()
+              ndsPropLibraries[library.family] = library
+              rebuildNdsPropCatalog()
+              status.text = "Loaded ${library.models.size} cached ${library.family.displayName} props"
+            } catch (t: Throwable) {
+              status.text = "Could not build ${source.family.displayName} prop cache"
+              JOptionPane.showMessageDialog(
+                  this@EditorFrame, t.cause?.message ?: t.message ?: t.toString(),
+                  "NDS prop cache failed", JOptionPane.WARNING_MESSAGE)
+            }
+          }
+        }.execute()
+      } else if (source == null && otherFamily !in ndsPropLibraries) {
+        status.text = "Open the other NDS decomp once to build its prop cache"
+      }
+    }
+    ndsPropsPanel.setModels(models.distinctBy { it.catalogId })
+  }
+
+  private fun beginNdsPropPlacement(info: NdsProject.PropModelInfo) {
     recordNdsSceneChange("place prop") {
       val map = currentNdsMap ?: return
       val holder = currentNdsHolder ?: return
       try {
+        val foreign = info.sourceFamily?.takeIf { it != holder.project.family }
+        val modelKey = if (foreign == null) {
+          info.sourceModelKey
+        } else {
+          val library = ndsPropLibraries[foreign]
+              ?: error("The ${foreign.displayName} prop library is not loaded")
+          val snapshot = library.snapshot(info)
+              ?: error("The cached prop ${info.label} could not be read")
+          holder.project.installForeignProp(info, snapshot).key
+        }
         val prop = holder.project.createProp(
             modelKey,
             snapNdsCoord(map.grid.cols / 2f),
             snapNdsCoord(map.grid.rows / 2f),
         )
         map.props += prop
+        selectedNdsPropIds.clear(); selectedNdsPropIds += prop.id
         selectedNdsPropId = prop.id
-        ndsPropsPanel.refreshProps(prop.id)
+        rebuildNdsPropCatalog()
+        ndsPropsPanel.refreshProps(selectedNdsPropIds, prop.id)
         ndsPaintMode.selectedIndex = 4
         refreshNdsPropGeometry(refreshTextures = true)
         markDirty()
-        status.text = "Placed ${modelKey.substringAfter(':')} at the map center — drag it to move"
+        status.text = "Placed ${info.label} at the map center - drag it to move"
       } catch (t: Throwable) {
         JOptionPane.showMessageDialog(
             this, t.message ?: t.toString(), "Place prop failed", JOptionPane.ERROR_MESSAGE)
@@ -2925,23 +3023,30 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
-  private fun selectNdsProp(id: String?) {
+  private fun selectNdsProp(id: String?) = selectNdsProps(id?.let(::setOf).orEmpty(), id)
+
+  private fun selectNdsProps(ids: Set<String>, primary: String?) {
     val map = currentNdsMap ?: return
-    selectedNdsPropId = id?.takeIf { candidate -> map.props.any { it.id == candidate } }
+    selectedNdsPropIds.clear()
+    selectedNdsPropIds += ids.filter { candidate -> map.props.any { it.id == candidate } }
+    selectedNdsPropId = primary?.takeIf { it in selectedNdsPropIds } ?: selectedNdsPropIds.lastOrNull()
     selectedNdsTerrainGroup = null
-    if (selectedNdsPropId != null && ndsPaintMode.selectedIndex != 4) {
-      ndsPaintMode.selectedIndex = 4
-    }
-    ndsPropsPanel.selectProp(selectedNdsPropId)
+    if (selectedNdsPropIds.isNotEmpty() && ndsPaintMode.selectedIndex != 4) ndsPaintMode.selectedIndex = 4
+    ndsPropsPanel.selectProps(selectedNdsPropIds, selectedNdsPropId)
     refreshNdsMarkers()
     val prop = map.props.firstOrNull { it.id == selectedNdsPropId }
-    status.text = if (prop == null) "No prop selected"
-    else "Selected ${prop.modelKey.substringAfter(':')} — drag to move, Delete removes"
+    status.text = when {
+      prop == null -> "No prop selected"
+      selectedNdsPropIds.size == 1 ->
+          "Selected ${prop.modelKey.substringAfter(':')} - drag to move, Delete removes"
+      else -> "Selected ${selectedNdsPropIds.size} props - drag to move together or use Merge Prop"
+    }
   }
 
   private fun selectNdsTerrainObject(groupId: String?) {
     val map = currentNdsMap ?: return
     val project = currentNdsHolder?.project ?: return
+    selectedNdsPropIds.clear()
     selectedNdsPropId = null
     selectedNdsTerrainGroup = groupId?.takeIf { project.terrainObject(map, it) != null }
     ndsPropsPanel.selectProp(null)
@@ -2975,19 +3080,22 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun removeSelectedNdsProp() {
-    recordNdsSceneChange("remove prop") {
+    recordNdsSceneChange("remove ${selectedNdsPropIds.size} prop(s)") {
       val map = currentNdsMap ?: return
       val holder = currentNdsHolder ?: return
-      val id = selectedNdsPropId ?: return
-      val removal = holder.project.removePropObject(
-          map, id, ndsClearCollisionWithTerrain.isSelected) ?: return
-      val removed = removal.removedProp ?: return
+      val ids = selectedNdsPropIds.toList()
+      if (ids.isEmpty()) return
+      var removed = 0
+      for (id in ids) {
+        if (holder.project.removePropObject(map, id, ndsClearCollisionWithTerrain.isSelected) != null) removed++
+      }
+      selectedNdsPropIds.clear()
       selectedNdsPropId = null
       selectedNdsTerrainGroup = null
       ndsPropsPanel.refreshProps(null)
       markDirty()
       refreshNdsPropGeometry(refreshTextures = false)
-      status.text = "Removed prop ${removed.modelKey.substringAfter(':')}"
+      status.text = "Removed $removed prop(s)"
     }
   }
 
@@ -2998,11 +3106,47 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val source = map.props.firstOrNull { it.id == selectedNdsPropId } ?: return
       val duplicate = holder.project.duplicateProp(source)
       map.props += duplicate
+      selectedNdsPropIds.clear(); selectedNdsPropIds += duplicate.id
       selectedNdsPropId = duplicate.id
-      ndsPropsPanel.refreshProps(duplicate.id)
+      ndsPropsPanel.refreshProps(selectedNdsPropIds, duplicate.id)
       markDirty()
       refreshNdsPropGeometry(refreshTextures = false)
       status.text = "Duplicated prop; drag it into place"
+    }
+  }
+
+  private fun mergeSelectedNdsProps() {
+    val map = currentNdsMap ?: return
+    val holder = currentNdsHolder ?: return
+    if (selectedNdsPropIds.size < 2) return
+    val label = JOptionPane.showInputDialog(
+        this, "Name for the merged catalog prop", "Merge Props",
+        JOptionPane.PLAIN_MESSAGE, null, null, "${map.displayName} merged prop")
+        ?.toString()?.trim() ?: return
+    if (label.isEmpty()) return
+    try {
+      val selectedIds = selectedNdsPropIds.toSet()
+      val merged = holder.project.buildMergedPropSnapshot(map, selectedIds)
+          ?: error("The selected props contain no supported geometry")
+      val saved = holder.project.saveMergedProp(label, merged.snapshot, map.name)
+      recordNdsSceneChange("merge ${selectedIds.size} props") {
+        // Replacement must not archive removals or alter collision: it is the same visible object.
+        map.props.removeAll { it.id in selectedIds }
+        val replacement = holder.project.createProp(saved.key, merged.x, merged.z)
+        replacement.y = merged.y
+        map.props += replacement
+        selectedNdsPropIds.clear(); selectedNdsPropIds += replacement.id
+        selectedNdsPropId = replacement.id
+        selectedNdsTerrainGroup = null
+        rebuildNdsPropCatalog()
+        ndsPropsPanel.selectModel(saved.catalogId)
+        ndsPropsPanel.refreshProps(selectedNdsPropIds, replacement.id)
+        markDirty()
+        refreshNdsPropGeometry(refreshTextures = true)
+        status.text = "Replaced ${selectedIds.size} props with merged '${saved.label}'"
+      }
+    } catch (t: Throwable) {
+      JOptionPane.showMessageDialog(this, t.message ?: t.toString(), "Merge Prop failed", JOptionPane.ERROR_MESSAGE)
     }
   }
 
@@ -3131,9 +3275,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
       is NdsSceneStep -> {
         // The selection can name a prop that no longer exists on this side of the step.
-        if (map.props.none { it.id == selectedNdsPropId }) selectedNdsPropId = null
+        selectedNdsPropIds.retainAll(map.props.map { it.id }.toSet())
+        if (selectedNdsPropId !in selectedNdsPropIds) selectedNdsPropId = selectedNdsPropIds.lastOrNull()
         selectedNdsTerrainGroup = null
-        ndsPropsPanel.refreshProps(selectedNdsPropId)
+        ndsPropsPanel.refreshProps(selectedNdsPropIds, selectedNdsPropId)
         // Textures too: a prop coming back needs the ones it was drawn with re-merged.
         refreshNdsPropGeometry(refreshTextures = true)
         status.text = "$verb ${step.label}"

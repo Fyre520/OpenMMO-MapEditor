@@ -149,7 +149,10 @@ class NdsGlMapView(
             if (e.button == MouseEvent.BUTTON1) {
               val hit =
                   if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
-                  else pointerHit(e.x, e.y, includeModelGroup = true)
+                  else pointerHit(e.x, e.y, includeModelGroup = true)?.copy(
+                      shiftDown = e.isShiftDown,
+                      ctrlDown = e.isControlDown,
+                  )
               if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
                 onStrokeBegin()

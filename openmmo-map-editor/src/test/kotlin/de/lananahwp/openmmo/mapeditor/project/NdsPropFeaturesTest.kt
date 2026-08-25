@@ -1,0 +1,97 @@
+package de.lananahwp.openmmo.mapeditor.project
+
+import de.lananahwp.openmmo.mapeditor.core.NdsFamily
+import de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot
+import de.lananahwp.openmmo.mapeditor.core.NdsTri
+import de.lananahwp.openmmo.mapeditor.model.NdsEvents
+import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsMap
+import de.lananahwp.openmmo.mapeditor.model.NdsMapHeader
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+
+class NdsPropFeaturesTest {
+  @Test
+  fun `merged prop preserves relative placement and reloads as a mesh catalog entry`() {
+    val root = Files.createTempDirectory("nds-merged-prop").toFile()
+    try {
+      val project = NdsProject(root)
+      val snapshot = NdsMeshSnapshot(listOf(unitTriangle()), emptyMap(), emptyMap())
+      val first = project.saveExtractedProp("First", snapshot, "TEST")
+      val second = project.saveExtractedProp("Second", snapshot, "TEST")
+      val map = NdsMap("TEST", 1, NdsMapHeader(), NdsEvents(), NdsGrid())
+      map.props += project.createProp(first.key, 1f, 2f).copy(id = "one")
+      map.props += project.createProp(second.key, 4f, 2f).copy(id = "two")
+
+      val merged = assertNotNull(project.buildMergedPropSnapshot(map, setOf("one", "two")))
+      assertEquals(2, merged.snapshot.triangles.size)
+      val xs = merged.snapshot.triangles.flatMap { listOf(it.ax, it.bx, it.cx) }
+      assertEquals(-2f, xs.min())
+      assertEquals(2f, xs.max())
+
+      assertEquals(3f, merged.x)
+      assertEquals(0f, merged.y)
+      assertEquals(2.5f, merged.z)
+
+      val saved = project.saveMergedProp("Together", merged.snapshot, map.name)
+      assertEquals("Merged", saved.category)
+      val reloaded = NdsProject(root).propModels().single { it.key == saved.key }
+      assertEquals("Merged", reloaded.category)
+      assertEquals(2, NdsProject(root).propModelPreview(saved.key, null).triangles.size)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `foreign prop is installed under a stable family-qualified key`() {
+    val root = Files.createTempDirectory("nds-foreign-prop").toFile()
+    try {
+      val project = NdsProject(root)
+      val snapshot = NdsMeshSnapshot(listOf(unitTriangle()), emptyMap(), emptyMap())
+      val source = NdsProject.PropModelInfo(
+          key = "rom:7",
+          label = "Foreign building",
+          imported = false,
+          category = "Building",
+          sourceFamily = NdsFamily.PLATINUM,
+          sourceModelKey = "rom:7",
+      )
+
+      val first = project.installForeignProp(source, snapshot)
+      val second = project.installForeignProp(source, snapshot)
+      assertEquals("foreign:platinum:7", first.key)
+      assertEquals(first.key, second.key)
+      assertTrue(project.propModels().any { it.key == first.key })
+      assertEquals(1, project.propModelPreview(first.key, null).triangles.size)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `built disk library can be reopened without its source project`() {
+    val source = Files.createTempDirectory("nds-library-source").toFile()
+    val cache = Files.createTempDirectory("nds-library-cache").toFile()
+    try {
+      val built = NdsPropLibrary.loadOrBuild(source, cache)
+      assertEquals(NdsFamily.HEART_GOLD, built.family)
+      val reopened = assertNotNull(NdsPropLibrary.loadCached(NdsFamily.HEART_GOLD, cache))
+      assertEquals(built.models, reopened.models)
+    } finally {
+      source.deleteRecursively()
+      cache.deleteRecursively()
+    }
+  }
+
+  private fun unitTriangle() = NdsTri(
+      0f, 0f, 0f,
+      1f, 0f, 0f,
+      0f, 0f, 1f,
+      0xFFFFFFFF.toInt(),
+      0f, 0f, 1f, 0f, 0f, 1f,
+  )
+}

@@ -585,6 +585,9 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       val label: String,
       val imported: Boolean,
       val category: String = if (imported) "Imported" else "Scenery",
+      val catalogId: String = key,
+      val sourceFamily: de.lananahwp.openmmo.mapeditor.core.NdsFamily? = null,
+      val sourceModelKey: String = key,
   ) {
     override fun toString(): String {
       val id = key.removePrefix("rom:").takeIf { key.startsWith("rom:") }
@@ -1286,33 +1289,73 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
       sourceMap: String,
   ): PropModelInfo {
+    return saveMeshProp(label, snapshot, "extracted", EXTRACTED_CATEGORY, "extracted", sourceMap)
+  }
+
+  /** Saves several transformed placements as one reusable, self-contained prop. */
+  fun saveMergedProp(
+      label: String,
+      snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
+      sourceMap: String,
+  ): PropModelInfo = saveMeshProp(label, snapshot, "merged", "Merged", "merged", sourceMap)
+
+  /** Installs a foreign-family ROM model locally so maps do not depend on the other ROM later. */
+  fun installForeignProp(
+      info: PropModelInfo,
+      snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
+  ): PropModelInfo {
+    val sourceFamily = requireNotNull(info.sourceFamily) { "Foreign prop has no source family" }
+    val sourceId = info.sourceModelKey.removePrefix("rom:")
+    val key = "foreign:${sourceFamily.name.lowercase()}:$sourceId"
+    return saveMeshProp(
+        info.label, snapshot, "foreign-rom",
+        "${info.category} - ${sourceFamily.displayName}", "foreign", null,
+        fixedKey = key,
+        extra = linkedMapOf(
+            "sourceFamily" to Json.JStr(sourceFamily.name),
+            "sourceModelKey" to Json.JStr(info.sourceModelKey),
+        ),
+    )
+  }
+
+  private fun saveMeshProp(
+      label: String,
+      snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
+      source: String,
+      category: String,
+      keyPrefix: String,
+      sourceMap: String?,
+      fixedKey: String? = null,
+      extra: LinkedHashMap<String, Json> = linkedMapOf(),
+  ): PropModelInfo {
     require(snapshot.triangles.isNotEmpty()) { "The selection contains no geometry to save" }
     var base = label.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-    if (base.isEmpty()) base = "surface"
-    var key = "extracted:$base"
+    if (base.isEmpty()) base = keyPrefix
+    var key = fixedKey ?: "$keyPrefix:$base"
     var suffix = 2
-    while (propModelManifest(key).exists()) key = "extracted:${base}_${suffix++}"
-    val dir = propModelDir(key)
-    dir.mkdirs()
+    while (fixedKey == null && propModelManifest(key).exists()) key = "$keyPrefix:${base}_${suffix++}"
+    propModelDir(key).mkdirs()
     de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot.write(propMeshFile(key), snapshot)
-    val resolvedLabel = label.trim().ifEmpty { "Surface from $sourceMap" }
-    val manifest = Json.JObj(linkedMapOf(
+    val resolvedLabel = label.trim().ifEmpty { sourceMap?.let { "Prop from $it" } ?: key }
+    val entries = linkedMapOf<String, Json>(
         "version" to Json.JNum(1.0),
         "key" to Json.JStr(key),
         "label" to Json.JStr(resolvedLabel),
-        "source" to Json.JStr("extracted"),
-        "sourceMap" to Json.JStr(sourceMap),
+        "source" to Json.JStr(source),
+        "category" to Json.JStr(category),
         "triangles" to Json.JNum(snapshot.triangles.size.toDouble()),
-    ))
-    propModelManifest(key).writeText(JsonWriter.writePretty(manifest) + "\n")
+    )
+    sourceMap?.let { entries["sourceMap"] = Json.JStr(it) }
+    entries.putAll(extra)
+    propModelManifest(key).writeText(JsonWriter.writePretty(Json.JObj(entries)) + "\n")
     propTriangleCache.remove(key)
     propTexturePackCache.remove(key)
     propMeshCache.remove(key)
-    return PropModelInfo(key, resolvedLabel, true, EXTRACTED_CATEGORY)
+    return PropModelInfo(key, resolvedLabel, true, category)
   }
 
-  /** The baked mesh behind an extracted catalog prop, or null for ROM/imported models. */
-  private fun extractedMesh(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
+  /** The baked mesh behind extracted, merged, or foreign catalog props. */
+  private fun meshSnapshot(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
     if (modelKey.startsWith("rom:")) return null
     if (modelKey in propMeshCache) return propMeshCache[modelKey]
     val loaded = de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot.read(propMeshFile(modelKey))
@@ -1673,7 +1716,17 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     for (prop in map.props) {
       val imported = !prop.modelKey.startsWith("rom:")
       val namespaceTextures = imported && propHasOwnTextures(prop.modelKey)
-      for (tri in propModelTriangles(prop.modelKey)) {
+      out += transformedPropTriangles(prop, namespaceTextures)
+    }
+    return out
+  }
+
+  private fun transformedPropTriangles(
+      prop: NdsProp,
+      namespaceTextures: Boolean,
+  ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+    for (tri in propModelTriangles(prop.modelKey)) {
         fun transform(x: Float, y: Float, z: Float): FloatArray {
           var px = x.toDouble(); var py = y.toDouble(); var pz = z.toDouble()
           var c = kotlin.math.cos(Math.toRadians(prop.rotationX.toDouble()))
@@ -1703,9 +1756,61 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
             palette = if (tri.palette.isEmpty()) "" else prefix + tri.palette,
             editGroup = "prop:${prop.id}",
         )
-      }
     }
     return out
+  }
+
+  /** Normalized, grounded ROM geometry for a disk-backed foreign prop library. */
+  fun portablePropSnapshot(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
+    val prop = try { createProp(modelKey, 0f, 0f) } catch (_: Throwable) { return null }
+    val triangles = transformedPropTriangles(prop, namespaceTextures = false)
+        .map { it.copy(editGroup = "") }
+    if (triangles.isEmpty()) return null
+    val preview = propModelPreview(modelKey, null)
+    return de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot(
+        triangles, preview.textures, preview.palettes)
+  }
+
+  data class MergedPropSnapshot(
+      val snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
+      /** Placement which reconstructs the selected world-space geometry exactly. */
+      val x: Float,
+      val y: Float,
+      val z: Float,
+  )
+
+  /** Bakes selected placed props with their relative transforms intact. */
+  fun buildMergedPropSnapshot(
+      map: NdsMap,
+      propIds: Set<String>,
+  ): MergedPropSnapshot? {
+    if (propIds.size < 2) return null
+    val selected = editablePropTriangles(map).filter {
+      it.editGroup.removePrefix("prop:") in propIds
+    }
+    if (selected.isEmpty()) return null
+    val minX = selected.minOf { minOf(it.ax, it.bx, it.cx) }
+    val maxX = selected.maxOf { maxOf(it.ax, it.bx, it.cx) }
+    val minY = selected.minOf { minOf(it.ay, it.by, it.cy) }
+    val minZ = selected.minOf { minOf(it.az, it.bz, it.cz) }
+    val maxZ = selected.maxOf { maxOf(it.az, it.bz, it.cz) }
+    val triangles = recentreSurfaceTriangles(selected)
+    val availableTextures = texturesFor(map)
+    val availablePalettes = palettesFor(map)
+    val textures = LinkedHashMap<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture>()
+    val palettes = LinkedHashMap<String, IntArray>()
+    for (name in triangles.map { it.texture }.filter { it.isNotEmpty() }.toSet()) {
+      availableTextures[name]?.let { textures[name] = it }
+    }
+    for (name in triangles.map { it.palette }.filter { it.isNotEmpty() }.toSet()) {
+      availablePalettes[name]?.let { palettes[name] = it }
+    }
+    return MergedPropSnapshot(
+        de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot(triangles, textures, palettes),
+        (minX + maxX) / 2f,
+        minY,
+        (minZ + maxZ) / 2f,
+    )
   }
 
   /** The map's area-data entry (buildingsTileset u16 at 0, mapTileset u16 at 2). */
@@ -2035,15 +2140,14 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
         ?.mapNotNull { dir ->
           try {
             val o = JsonParser.parse(File(dir, "model.json").readText()).asObj() ?: return@mapNotNull null
-            // An imported prop is an NSBMD on disk; an extracted one is a baked mesh snapshot.
-            val extracted = o.str("source") == "extracted"
-            val payload = if (extracted) File(dir, "mesh.bin") else File(dir, "model.nsbmd")
+            val meshBacked = File(dir, "mesh.bin").isFile
+            val payload = if (meshBacked) File(dir, "mesh.bin") else File(dir, "model.nsbmd")
             if (!payload.isFile) return@mapNotNull null
             PropModelInfo(
                 o.str("key") ?: dir.name,
                 o.str("label") ?: dir.name,
                 true,
-                if (extracted) EXTRACTED_CATEGORY else "Imported",
+                o.str("category") ?: if (meshBacked) EXTRACTED_CATEGORY else "Imported",
             )
           } catch (_: Throwable) {
             null
@@ -2053,7 +2157,12 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
         .orEmpty()
     val romModels = buildModelFiles.orEmpty().indices.drop(1).map { id ->
       val description = NdsPropCatalog.describe(family, id, propModelTriangles("rom:$id"))
-      PropModelInfo("rom:$id", description.name, false, description.category)
+      PropModelInfo(
+          "rom:$id", description.name, false, description.category,
+          catalogId = "${family.name}:${rootDir.canonicalPath}:rom:$id",
+          sourceFamily = family,
+          sourceModelKey = "rom:$id",
+      )
     }
     return imported + romModels
   }
@@ -2064,7 +2173,7 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     if (triangles.isEmpty()) return PropModelPreview(emptyList(), emptyMap(), emptyMap())
     // An extracted prop is fully self-describing; its snapshot already holds exactly the textures
     // and palettes its triangles name, under those same (un-namespaced) names.
-    extractedMesh(modelKey)?.let { mesh ->
+    meshSnapshot(modelKey)?.let { mesh ->
       return PropModelPreview(mesh.triangles, mesh.textures, mesh.palettes)
     }
     val referencedTextures = triangles.map { it.texture }.filter { it.isNotEmpty() }.toSet()
@@ -2130,7 +2239,7 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     // An arbitrary NSBMD import has no meaningful relationship to tile size, so it gets normalised
     // to a single tile. Extracted geometry was already measured in map tiles when it was lifted,
     // so scaling it would shrink a 3x3 patch of path down to one square.
-    val scale = if (extractedMesh(modelKey) != null) {
+    val scale = if (meshSnapshot(modelKey) != null) {
       1f
     } else {
       val span = maxOf(b.maxX - b.minX, b.maxZ - b.minZ, 0.0001f)
@@ -2197,7 +2306,7 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
 
   private fun propModelTriangles(modelKey: String): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> =
       propTriangleCache.getOrPut(modelKey) {
-        extractedMesh(modelKey)?.triangles
+        meshSnapshot(modelKey)?.triangles
             ?: propModelBytes(modelKey)?.let {
               de.lananahwp.openmmo.mapeditor.core.NdsNsbmd.decode(it, worldScale = false)
             }.orEmpty()
@@ -2208,16 +2317,16 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
    * namespaced per model so two props cannot collide on a shared name like `tex0`.
    */
   private fun propHasOwnTextures(modelKey: String): Boolean =
-      extractedMesh(modelKey) != null || propTexturePacks(modelKey).isNotEmpty()
+      meshSnapshot(modelKey) != null || propTexturePacks(modelKey).isNotEmpty()
 
   /** Namespaced textures contributed by an extracted prop, matching [editablePropTriangles]. */
   private fun extractedPropTextures(
       modelKey: String,
   ): Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture> =
-      extractedMesh(modelKey)?.textures.orEmpty().mapKeys { "$modelKey::${it.key}" }
+      meshSnapshot(modelKey)?.textures.orEmpty().mapKeys { "$modelKey::${it.key}" }
 
   private fun extractedPropPalettes(modelKey: String): Map<String, IntArray> =
-      extractedMesh(modelKey)?.palettes.orEmpty().mapKeys { "$modelKey::${it.key}" }
+      meshSnapshot(modelKey)?.palettes.orEmpty().mapKeys { "$modelKey::${it.key}" }
 
   private fun validateImportFiles(modelFile: File?, textureFile: File?): Pair<Int, Int> {
     if (modelFile == null) {
