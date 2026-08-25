@@ -75,7 +75,7 @@ object NdsCustomTileStore {
     val label = name.trim().ifEmpty { "Tile $index" }
 
     tileDir(index).mkdirs()
-    NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), normalise(snapshot))
+    NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
 
     val updated = existing + TileInfo(index, label)
     val json = Json.JObj(linkedMapOf(
@@ -103,32 +103,30 @@ object NdsCustomTileStore {
   }
 
   /**
-   * Moves a snapshot into tile space: spanning x and z in 0..1, resting on y=0.
+   * Rests a tile on the ground: y=0 at its lowest point, x and z exactly as they arrived.
    *
-   * An extracted square arrives centred on its own origin at whatever size it was cut at, so
-   * without this a tile would paint offset from its cell and at the source map's scale.
+   * The geometry is already in tile space -- extraction output is in map-tile units, one unit
+   * per square, and [NdsProject.SurfaceOrigin.CELL] has put it relative to the square it was cut
+   * from. So there is nothing to scale, and this only makes the resting height certain.
+   *
+   * This used to scale the cut's bounding box to fill a unit square, which was wrong by
+   * construction: it resized a tile by however much of its square the geometry happened to
+   * cover. A patch left partly bare -- which is what a cliff square becomes once its vertical
+   * faces are dropped -- came out magnified, and a near-degenerate sliver came out enormous.
    */
-  private fun normalise(snapshot: NdsMeshSnapshot): NdsMeshSnapshot {
+  private fun restOnGround(snapshot: NdsMeshSnapshot): NdsMeshSnapshot {
     val tris = snapshot.triangles
-    var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
     var minY = Float.MAX_VALUE
-    var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
     for (t in tris) {
-      for (v in floatArrayOf(t.ax, t.bx, t.cx)) { minX = minOf(minX, v); maxX = maxOf(maxX, v) }
-      for (v in floatArrayOf(t.ay, t.by, t.cy)) { minY = minOf(minY, v) }
-      for (v in floatArrayOf(t.az, t.bz, t.cz)) { minZ = minOf(minZ, v); maxZ = maxOf(maxZ, v) }
+      for (v in floatArrayOf(t.ay, t.by, t.cy)) minY = minOf(minY, v)
     }
-    // Uniform scale off the wider side keeps a not-quite-square cut from being stretched.
-    val scale = 1f / maxOf((maxX - minX).coerceAtLeast(1e-4f), (maxZ - minZ).coerceAtLeast(1e-4f))
-    fun mx(v: Float) = (v - minX) * scale
-    fun my(v: Float) = (v - minY) * scale
-    fun mz(v: Float) = (v - minZ) * scale
+    if (minY == 0f) return snapshot
     return NdsMeshSnapshot(
         tris.map { t ->
           t.copy(
-              ax = mx(t.ax), ay = my(t.ay), az = mz(t.az),
-              bx = mx(t.bx), by = my(t.by), bz = mz(t.bz),
-              cx = mx(t.cx), cy = my(t.cy), cz = mz(t.cz),
+              ay = t.ay - minY,
+              by = t.by - minY,
+              cy = t.cy - minY,
           )
         },
         snapshot.textures,

@@ -27,6 +27,9 @@ fun main(args: Array<String>) {
   testRecentring()
   testSnapshotRoundTrip()
   testCustomTiles()
+  testTilesRestOnTheTerrainUnderThem()
+  testTileSpaceKeepsItsSize()
+  testWallsAreOptional()
   testPaintedTilesRestOnTerrainOnly()
   testCtrlErasesAPaintedSquare()
 
@@ -87,17 +90,23 @@ private fun testCustomTiles() {
     check(listed.map { it.index } == listOf(base, base + 1)) { "tile indices changed on reload" }
     check(listed.map { it.name } == listOf("Olivine path", "Park grass")) { "tile order changed" }
 
-    // Geometry must arrive in tile space: spanning 0..1 in X and Z, resting on y=0, or a painted
-    // tile would land offset from its square and at the source map's scale.
+    // The store rests a tile on y=0 and otherwise stores exactly what it was handed. It must
+    // never rescale: the fixture is two tiles across, and it has to stay two tiles across.
+    // Scaling a cut to fill a unit square resized it by however much of its square the geometry
+    // happened to cover, which magnified anything that did not fill one -- a cliff square, once
+    // its vertical faces are dropped, is exactly that.
     val mesh = store.mesh(base) ?: error("tile mesh did not reload")
     val xs = mesh.triangles.flatMap { listOf(it.ax, it.bx, it.cx) }
     val ys = mesh.triangles.flatMap { listOf(it.ay, it.by, it.cy) }
     val zs = mesh.triangles.flatMap { listOf(it.az, it.bz, it.cz) }
-    check(kotlin.math.abs(xs.min()) < 1e-4f && kotlin.math.abs(xs.max() - 1f) < 1e-4f) {
-      "tile X should span 0..1, got ${xs.min()}..${xs.max()}"
+    check(kotlin.math.abs((xs.max() - xs.min()) - 2f) < 1e-4f) {
+      "tile X span should survive untouched at 2, got ${xs.max() - xs.min()}"
     }
-    check(kotlin.math.abs(zs.min()) < 1e-4f && kotlin.math.abs(zs.max() - 1f) < 1e-4f) {
-      "tile Z should span 0..1, got ${zs.min()}..${zs.max()}"
+    check(kotlin.math.abs((zs.max() - zs.min()) - 2f) < 1e-4f) {
+      "tile Z span should survive untouched at 2, got ${zs.max() - zs.min()}"
+    }
+    check(kotlin.math.abs(xs.min() - 20f) < 1e-4f && kotlin.math.abs(zs.min() - 30f) < 1e-4f) {
+      "the store moved a tile in XZ: ${xs.min()}, ${zs.min()}"
     }
     check(kotlin.math.abs(ys.min()) < 1e-4f) { "tile should rest on y=0, got ${ys.min()}" }
     check(mesh.textures.containsKey("grass")) { "tile lost its texture" }
@@ -308,6 +317,44 @@ private fun testCtrlErasesAPaintedSquare() {
   check(grid.tileAt(0, x, z) == -1) { "the square should be empty again" }
 }
 
+/**
+ * A painted tile rests on the terrain under its square, whichever kind of tile it is.
+ *
+ * Extracted tiles used to be positioned by the painted height alone while built-in ones sat
+ * on the surface, so a tile that looked right in the viewport exported buried inside the map.
+ * Both builders now read their base from one place, and this covers that place: they can only
+ * drift again if someone reintroduces a second copy of the sum.
+ */
+private fun testTilesRestOnTheTerrainUnderThem() {
+  val grid = NdsGrid(4, 4)
+  // A square with terrain 3 tiles up, one with terrain at grid level, one with nothing.
+  val surface = Array(4) { FloatArray(4) { Float.NaN } }
+  surface[1][1] = 3f
+  surface[2][2] = 0f
+
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 1, 1) == 3f) {
+    "a tile on terrain 3 tiles up should rest there, got " +
+        NdsProject.tileBaseHeight(surface, grid, 0, 1, 1)
+  }
+
+  // The painted height is an offset from that surface, not a position of its own.
+  grid.setHeight(0, 1, 1, 2)
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 1, 1) == 5f) {
+    "painted height should stack onto the terrain, got " +
+        NdsProject.tileBaseHeight(surface, grid, 0, 1, 1)
+  }
+
+  // Squares with no terrain over them keep sitting on the grid plane, so paint stays visible
+  // on the open ground around a map as well as on the map itself.
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 3, 3) == 0f) { "empty square left y=0" }
+  grid.setHeight(0, 3, 3, -2)
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 3, 3) == -2f) { "height ignored off-map" }
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 2, 2) == 0f) { "terrain at 0 is not empty" }
+
+  // Out of bounds resolves rather than throwing: terrain can reach past the grid under it.
+  check(NdsProject.tileBaseHeight(surface, grid, 0, 9, 9) == 0f) { "off-grid square threw" }
+}
+
 /** A flat unit-square-ish triangle sitting on tile (x, z) at height y. */
 private fun tileTri(x: Int, z: Int, y: Float = 0f, texture: String = "grass"): NdsTri = NdsTri(
     ax = x + 0.1f, ay = y, az = z + 0.1f,
@@ -318,6 +365,122 @@ private fun tileTri(x: Int, z: Int, y: Float = 0f, texture: String = "grass"): N
     texture = texture,
     palette = "$texture-pal",
 )
+
+/**
+ * A vertical wall standing on the line between two squares, as a tile-aligned cliff face is.
+ *
+ * Its footprint is a line, so it has no area to test a square against -- which is exactly why it
+ * needs its own path through selection.
+ */
+private fun wallTri(x: Int, z: Float, height: Float = 1f, texture: String = "rock"): NdsTri = NdsTri(
+    ax = x + 0f, ay = 0f, az = z,
+    bx = x + 1f, by = 0f, bz = z,
+    cx = x + 1f, cy = height, cz = z,
+    color = -1,
+    u0 = 0f, v0 = 0f, u1 = 1f, v1 = 0f, u2 = 1f, v2 = 1f,
+    texture = texture,
+    palette = "$texture-pal",
+)
+
+/**
+ * Tile space is a translation, never a rescale.
+ *
+ * A tile is painted one unit per square, and extraction output is already in map-tile units, so a
+ * cut has to come out the size it went in at. Scaling it to fill a unit square -- which is what
+ * this used to do -- resized a tile by however much of its square the geometry covered, so a
+ * quarter-covered square came out four times too big and a sliver came out enormous.
+ */
+private fun testTileSpaceKeepsItsSize() {
+  val cell = setOf(NdsProject.surfaceCellKey(12, 7))
+
+  // A square fully covered by its surface: 1x1 in, 1x1 out, moved to the square's own corner.
+  val full = NdsProject.cellRelativeSurfaceTriangles(
+      listOf(
+          NdsTri(
+              ax = 12f, ay = 4f, az = 7f, bx = 13f, by = 4f, bz = 7f, cx = 13f, cy = 4f, cz = 8f,
+              color = -1, u0 = 0f, v0 = 0f, u1 = 1f, v1 = 0f, u2 = 1f, v2 = 1f,
+              texture = "grass", palette = "grass-pal"),
+      ),
+      cell,
+  )
+  val fullXs = full.flatMap { listOf(it.ax, it.bx, it.cx) }
+  val fullYs = full.flatMap { listOf(it.ay, it.by, it.cy) }
+  check(kotlin.math.abs(fullXs.min()) < 1e-4f && kotlin.math.abs(fullXs.max() - 1f) < 1e-4f) {
+    "a full square should land on 0..1, got ${fullXs.min()}..${fullXs.max()}"
+  }
+  check(kotlin.math.abs(fullYs.min()) < 1e-4f) { "tile geometry should rest on y=0" }
+
+  // A square only a quarter covered must stay a quarter covered, and stay where it was cut.
+  val partial = NdsProject.cellRelativeSurfaceTriangles(
+      listOf(
+          NdsTri(
+              ax = 12f, ay = 4f, az = 7f, bx = 12.5f, by = 4f, bz = 7f,
+              cx = 12.5f, cy = 4f, cz = 7.5f,
+              color = -1, u0 = 0f, v0 = 0f, u1 = 1f, v1 = 0f, u2 = 1f, v2 = 1f,
+              texture = "grass", palette = "grass-pal"),
+      ),
+      cell,
+  )
+  val partialXs = partial.flatMap { listOf(it.ax, it.bx, it.cx) }
+  val partialZs = partial.flatMap { listOf(it.az, it.bz, it.cz) }
+  check(kotlin.math.abs(partialXs.max() - 0.5f) < 1e-4f) {
+    "a half-wide cut was resized to ${partialXs.max()}"
+  }
+  check(kotlin.math.abs(partialZs.max() - 0.5f) < 1e-4f) {
+    "a half-deep cut was resized to ${partialZs.max()}"
+  }
+  check(kotlin.math.abs(partialXs.min()) < 1e-4f && kotlin.math.abs(partialZs.min()) < 1e-4f) {
+    "a partial cut should keep its place in the square, got ${partialXs.min()}, ${partialZs.min()}"
+  }
+
+  // Height is left alone too: a wall three tiles tall stays three tiles tall.
+  val tall = NdsProject.cellRelativeSurfaceTriangles(listOf(wallTri(12, 7f, height = 3f)), cell)
+  val tallYs = tall.flatMap { listOf(it.ay, it.by, it.cy) }
+  check(kotlin.math.abs((tallYs.max() - tallYs.min()) - 3f) < 1e-4f) {
+    "wall height was rescaled to ${tallYs.max() - tallYs.min()}"
+  }
+}
+
+/**
+ * Cliff faces are opt-in, and reachable at all.
+ *
+ * A tile-aligned wall lies exactly on a square's edge, so the strict overlap test the surfaces use
+ * rejected it from both neighbours at once: picking a cliff face was impossible in either cut
+ * mode. Asked for, it now resolves to the squares it divides -- once, however many of them are
+ * picked.
+ */
+private fun testWallsAreOptional() {
+  val ground = tileTri(3, 4, texture = "grass")
+  // The wall stands on z=5, the line between square (3,4) and square (3,5).
+  val wall = wallTri(3, 5f)
+  val triangles = listOf(ground, wall)
+  val cell = setOf(NdsProject.surfaceCellKey(3, 4))
+  val free = NdsProject.SurfaceCut.FREEFORM
+
+  val without = NdsProject.filterSurfaceTriangles(triangles, cell, cut = free)
+  check(without.none { it.texture == "rock" }) {
+    "a wall came along uninvited: lifting flat ground must not drag the cliff beside it"
+  }
+  check(without.isNotEmpty()) { "the ground surface itself went missing" }
+
+  val included = NdsProject.filterSurfaceTriangles(triangles, cell, cut = free, includeWalls = true)
+  check(included.count { it.texture == "rock" } >= 1) {
+    "the wall on the square's edge is still unreachable"
+  }
+
+  // Squares mode rebuilds the flat top; the wall has to arrive alongside it, not instead of it.
+  val squared = NdsProject.filterSurfaceTriangles(
+      triangles, cell, cut = NdsProject.SurfaceCut.SQUARES, includeWalls = true)
+  check(squared.any { it.texture == "rock" }) { "squares mode dropped the wall" }
+  check(squared.any { it.texture == "grass" }) { "squares mode dropped the surface" }
+
+  // Both squares the wall divides can be picked at once; it is one face and must arrive once.
+  val bothCells = setOf(NdsProject.surfaceCellKey(3, 4), NdsProject.surfaceCellKey(3, 5))
+  val shared = NdsProject.filterSurfaceTriangles(
+      triangles, bothCells, cut = free, includeWalls = true)
+  val sharedWalls = shared.count { it.texture == "rock" }
+  check(sharedWalls == 1) { "the shared wall was taken $sharedWalls times, expected once" }
+}
 
 private fun testBrushCells() {
   // Size 1 is the headline case: one click takes exactly the square under the pointer.

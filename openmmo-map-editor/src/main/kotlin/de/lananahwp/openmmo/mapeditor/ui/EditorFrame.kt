@@ -248,6 +248,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   // ground like a path can be taken a square at a time.
   private val ndsSurfaceBrushSpinner = JSpinner(SpinnerNumberModel(1, 1, 32, 1))
   private val ndsSurfaceSameTexture = JCheckBox("Same texture only", true)
+  /**
+   * Whether the vertical faces standing on the picked squares come along too.
+   *
+   * Purely additive, and off by default, so both cut modes behave as they always have until it
+   * is asked for. It is what makes a cliff face reachable at all: a tile-aligned wall stands
+   * exactly on the line between two squares, so the footprint test the surfaces are chosen by
+   * rejects it from both at once.
+   */
+  private val ndsSurfaceIncludeWalls = JCheckBox("Include walls", false)
   private val ndsSurfaceCut = JComboBox(arrayOf("Whole squares", "Free-form"))
   private val ndsSurfaceSaveButton = JButton("Save selection as prop...")
   private val ndsSurfaceAddTileButton = JButton("Add as tile")
@@ -645,6 +654,17 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             (ndsSurfaceTextureFilterOrNull()?.let { " of texture '$it'" } ?: " (all textures)")
       }
     }
+    ndsSurfaceIncludeWalls.toolTipText =
+        "Also take the vertical faces standing on the picked squares - cliff faces, step risers. " +
+            "Needed for a cliff: a wall sitting on a square edge belongs to neither neighbour " +
+            "without it."
+    ndsSurfaceIncludeWalls.addActionListener {
+      refreshNdsSurfaceHighlight()
+      if (ndsSurfaceCells.isNotEmpty()) {
+        status.text = "Surface selection: ${ndsSurfaceHighlightTriangles().size} triangle(s)" +
+            (if (ndsSurfaceIncludeWalls.isSelected) ", walls included" else ", without walls")
+      }
+    }
     ndsSurfaceCut.toolTipText =
         "Whole squares: each picked square becomes one flat quad, easy to place and line up. " +
             "Free-form: keeps the map's own slopes and walls exactly as they are."
@@ -690,6 +710,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     surfaceToolbar.add(JLabel("Pick brush (squares):"))
     surfaceToolbar.add(ndsSurfaceBrushSpinner)
     surfaceToolbar.add(ndsSurfaceSameTexture)
+    surfaceToolbar.add(ndsSurfaceIncludeWalls)
     surfaceToolbar.add(JLabel("Cut:"))
     surfaceToolbar.add(ndsSurfaceCut)
     surfaceToolbar.add(ndsSurfaceSaveButton)
@@ -2577,7 +2598,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val project = currentNdsHolder?.project ?: return emptyList()
     return project.surfaceTriangles(
         map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
-        ndsSurfacePickedHeights)
+        ndsSurfacePickedHeights, ndsSurfaceIncludeWalls.isSelected)
   }
 
   private fun ndsSurfaceTextureFilterOrNull(): String? =
@@ -2611,6 +2632,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsTileBrushSpinner.isEnabled = ndsPaintMode.selectedIndex in 0..3
     ndsSurfaceBrushSpinner.isEnabled = surfaceMode
     ndsSurfaceSameTexture.isEnabled = surfaceMode
+    ndsSurfaceIncludeWalls.isEnabled = surfaceMode
     ndsSurfaceCut.isEnabled = surfaceMode
     ndsSurfaceSaveButton.isEnabled = surfaceMode
     ndsSurfaceAddTileButton.isEnabled = surfaceMode
@@ -2690,9 +2712,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       )
       return
     }
+    // Tile space, not prop space: a tile is painted into a square, so its geometry has to sit
+    // where it was cut relative to that square rather than being recentred on itself.
     val snapshot = holder.project.buildSurfaceExtraction(
         map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
-        ndsSurfacePickedHeights)
+        ndsSurfacePickedHeights, ndsSurfaceIncludeWalls.isSelected,
+        NdsProject.SurfaceOrigin.CELL)
     if (snapshot == null) {
       JOptionPane.showMessageDialog(
           this,
@@ -2736,7 +2761,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     val snapshot = holder.project.buildSurfaceExtraction(
         map, ndsSurfaceCells, ndsSurfaceTextureFilterOrNull(), ndsSurfaceCutMode(),
-        ndsSurfacePickedHeights)
+        ndsSurfacePickedHeights, ndsSurfaceIncludeWalls.isSelected)
     if (snapshot == null) {
       JOptionPane.showMessageDialog(
           this,

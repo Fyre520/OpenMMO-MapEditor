@@ -39,6 +39,21 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
   /** 1 DS map-model unit = 4 tiles (map cells are ~8 units per 32x32 tile cell). */
   private val TILE_SCALE = 4f
 
+  /** Where an extracted mesh sits relative to its own geometry. */
+  enum class SurfaceOrigin {
+    /** Centred on its own footprint, resting on y=0: a prop is placed by its own origin. */
+    CENTRE,
+
+    /**
+     * Relative to the corner of the picked square, resting on y=0 -- what a paintable tile needs.
+     *
+     * Tile space is one unit per square and extraction output is already in map-tile units, so
+     * this is a pure translation. Nothing here rescales, which is the whole point: a tile has to
+     * come out the size it was cut at, whether it covered its square or barely grazed it.
+     */
+    CELL,
+  }
+
   /** How picked geometry is cut out of the map. */
   enum class SurfaceCut {
     /**
@@ -111,23 +126,44 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
         textureFilter: String? = null,
         cut: SurfaceCut = SurfaceCut.SQUARES,
         pickedHeights: Map<Long, Float>? = null,
+        includeWalls: Boolean = false,
     ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
       if (cells.isEmpty()) return emptyList()
       val candidates =
           if (textureFilter == null) triangles else triangles.filter { it.texture == textureFilter }
       if (candidates.isEmpty()) return emptyList()
 
+      // Vertical faces get their own pass, because the surface passes below cannot reach the ones
+      // that matter: a wall has no footprint to measure a square against and no height to read at
+      // a point, and a tile-aligned one stands exactly on the line between two squares, so a
+      // strict overlap test rejects it from both at once. Asking for walls picks those up, in
+      // either cut mode. Left alone, both modes behave exactly as they always have.
+      val walls =
+          if (!includeWalls) emptyList()
+          else {
+            // A face standing on the line between two picked squares answers to both. It is still
+            // one face, so the set keeps it once.
+            val collected = LinkedHashSet<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+            for (cell in cells) {
+              collected += wallsForCell(candidates, surfaceCellX(cell), surfaceCellZ(cell))
+            }
+            collected.toList()
+          }
+
       if (cut == SurfaceCut.SQUARES) {
-        val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>(cells.size * 2)
+        val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>(cells.size * 2 + walls.size)
         for (cell in cells) {
           out += squareForCell(
               candidates, surfaceCellX(cell), surfaceCellZ(cell), pickedHeights?.get(cell))
         }
-        return out
+        return out + walls
       }
 
       val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
       for (tri in candidates) {
+        // Free-form has always kept the walls that fall inside a square, and still does. When the
+        // wall pass is running it owns all of them, so they are not collected twice.
+        if (includeWalls && isVerticalFace(tri)) continue
         val triMinX = minOf(tri.ax, tri.bx, tri.cx)
         val triMaxX = maxOf(tri.ax, tri.bx, tri.cx)
         val triMinZ = minOf(tri.az, tri.bz, tri.cz)
@@ -141,8 +177,99 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
           out += clipTriangleToCell(tri, cellX, cellZ)
         }
       }
+      return out + walls
+    }
+
+    /**
+     * Whether a triangle stands on the ground plane rather than lying on it.
+     *
+     * Cliff faces are why this matters. Selection is keyed on map squares, and a tile-aligned
+     * wall stands exactly on the line between two of them, so a strict overlap test puts it in
+     * neither: it fails "reaches into this square" from both sides at once.
+     */
+    private fun isVerticalFace(tri: de.lananahwp.openmmo.mapeditor.core.NdsTri): Boolean =
+        footprintArea(tri) < VERTICAL_FACE_AREA
+
+    /**
+     * The vertical faces belonging to one square, trimmed to it.
+     *
+     * Bounds are inclusive here, unlike the surface tests, because a wall footprint is a line
+     * that typically lies on a square edge. [clipTriangleToCell] then does the right thing
+     * unchanged: the two planes of the axis the wall lies on evaluate to 0 and 1, so the face
+     * survives them, and it is trimmed along the axis it actually runs in.
+     */
+    private fun wallsForCell(
+        triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+        cellX: Int,
+        cellZ: Int,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      val x0 = cellX.toFloat()
+      val z0 = cellZ.toFloat()
+      val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+      for (tri in triangles) {
+        if (!isVerticalFace(tri)) continue
+        if (maxOf(tri.ax, tri.bx, tri.cx) < x0 - CELL_EDGE_EPSILON) continue
+        if (minOf(tri.ax, tri.bx, tri.cx) > x0 + 1f + CELL_EDGE_EPSILON) continue
+        if (maxOf(tri.az, tri.bz, tri.cz) < z0 - CELL_EDGE_EPSILON) continue
+        if (minOf(tri.az, tri.bz, tri.cz) > z0 + 1f + CELL_EDGE_EPSILON) continue
+        out += clipTriangleToCell(tri, x0, z0)
+      }
       return out
     }
+
+    /**
+     * Moves geometry into the picked square's own space: x and z relative to that
+     * square's corner, y from the lowest point of the cut.
+     *
+     * A translation and nothing else, deliberately. Extraction output is already in map-tile
+     * units -- one unit per square, the same units a tile is painted in -- so scaling it to its
+     * own bounding box would resize the cut by however much of the square its geometry happened
+     * to cover, and blow up a near-degenerate sliver entirely.
+     */
+    fun cellRelativeSurfaceTriangles(
+        selected: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+        cells: Set<Long>,
+    ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+      if (selected.isEmpty() || cells.isEmpty()) return emptyList()
+      val originX = cells.minOf { surfaceCellX(it) }.toFloat()
+      val originZ = cells.minOf { surfaceCellZ(it) }.toFloat()
+      var minY = Float.MAX_VALUE
+      for (t in selected) for (v in floatArrayOf(t.ay, t.by, t.cy)) minY = minOf(minY, v)
+      return selected.map { t ->
+        t.copy(
+            ax = t.ax - originX, ay = t.ay - minY, az = t.az - originZ,
+            bx = t.bx - originX, by = t.by - minY, bz = t.bz - originZ,
+            cx = t.cx - originX, cy = t.cy - minY, cz = t.cz - originZ,
+            // The snapshot is its own model now; a source-map group id would be meaningless here.
+            editGroup = "",
+        )
+      }
+    }
+
+    /**
+     * Where a tile painted on a square rests: the terrain under that square plus the painted
+     * height, or the grid plane where no terrain covers it.
+     *
+     * Shared by builtInTileTrianglesFor and customTileTrianglesFor so the two cannot drift.
+     * They did: extracted tiles were positioned by the painted height alone, so they exported
+     * buried inside the very terrain the built-in tiles were resting on top of.
+     */
+    fun tileBaseHeight(
+        surface: Array<FloatArray>,
+        grid: NdsGrid,
+        layer: Int,
+        x: Int,
+        z: Int,
+    ): Float {
+      val ground = surface.getOrNull(x)?.getOrNull(z)?.takeUnless(Float::isNaN) ?: 0f
+      return ground + grid.heightAt(layer, x, z)
+    }
+
+    /** Footprint area below which a triangle counts as a wall rather than as a surface. */
+    private const val VERTICAL_FACE_AREA = 1e-4f
+
+    /** Slack for "touches this square", so a face lying exactly on an edge counts as inside it. */
+    private const val CELL_EDGE_EPSILON = 1e-3f
 
     /** Height and texture coordinates read off a triangle's plane at some XZ point. */
     private class PlaneSample(val y: Float, val u: Float, val v: Float, val inside: Boolean)
@@ -1048,8 +1175,10 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       textureFilter: String? = null,
       cut: SurfaceCut = SurfaceCut.SQUARES,
       pickedHeights: Map<Long, Float>? = null,
+      includeWalls: Boolean = false,
   ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> =
-      filterSurfaceTriangles(trianglesFor(map), cells, textureFilter, cut, pickedHeights)
+      filterSurfaceTriangles(
+          trianglesFor(map), cells, textureFilter, cut, pickedHeights, includeWalls)
 
   /**
    * Bakes selected terrain into a standalone mesh: geometry recentred on its own origin plus every
@@ -1061,9 +1190,15 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       textureFilter: String? = null,
       cut: SurfaceCut = SurfaceCut.SQUARES,
       pickedHeights: Map<Long, Float>? = null,
+      includeWalls: Boolean = false,
+      origin: SurfaceOrigin = SurfaceOrigin.CENTRE,
   ): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
+    val selected = surfaceTriangles(map, cells, textureFilter, cut, pickedHeights, includeWalls)
     val triangles =
-        recentreSurfaceTriangles(surfaceTriangles(map, cells, textureFilter, cut, pickedHeights))
+        when (origin) {
+          SurfaceOrigin.CENTRE -> recentreSurfaceTriangles(selected)
+          SurfaceOrigin.CELL -> cellRelativeSurfaceTriangles(selected, cells)
+        }
     if (triangles.isEmpty()) return null
 
     val referencedTextures = triangles.map { it.texture }.filter { it.isNotEmpty() }.toSet()
@@ -1305,8 +1440,7 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
         val tile = map.grid.tileAt(layer, x, z)
         if (tile < 0 || NdsTileset.isCustom(tile)) continue
         val def = NdsTileset.tiles.getOrNull(tile) ?: continue
-        val ground = surface[x][z].takeUnless(Float::isNaN) ?: 0f
-        val base = ground + map.grid.heightAt(layer, x, z)
+        val base = tileBaseHeight(surface, map.grid, layer, x, z)
         val top = shadeTileColor(def.topColor, layer)
         when (def.shape) {
           TileShape.FLAT ->
@@ -1395,16 +1529,24 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     out += triangle(vertices[0], vertices[2], vertices[3])
   }
 
-  /** Painted shared-library tiles, positioned exactly as the editor's 3D views position them. */
+  /**
+   * Painted shared-library tiles, positioned exactly as the editor's 3D views position them.
+   *
+   * Rests on the map surface under each square, the same as [builtInTileTrianglesFor] and the
+   * OpenGL view do. Taking the painted height alone -- which this did -- left an extracted tile
+   * down at grid level while the terrain it was painted onto sat well above it, so a tile that
+   * looked right in the viewport exported buried inside the map.
+   */
   fun customTileTrianglesFor(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
     val geometry = NdsCustomTileStore.viewGeometry()
     if (geometry.isEmpty()) return emptyList()
+    val surface = tileSurfaceHeights(map)
     val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
     for (layer in 0 until de.lananahwp.openmmo.mapeditor.model.NdsGrid.LAYERS) {
       for (x in 0 until map.grid.cols) for (z in 0 until map.grid.rows) {
         val tile = map.grid.tileAt(layer, x, z)
         if (!de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(tile)) continue
-        val base = map.grid.heightAt(layer, x, z).toFloat()
+        val base = tileBaseHeight(surface, map.grid, layer, x, z)
         for (triangle in geometry[tile].orEmpty()) {
           out +=
               triangle.copy(
