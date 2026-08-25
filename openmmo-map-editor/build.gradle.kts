@@ -105,6 +105,13 @@ tasks.register<JavaExec>("meshInspect") {
   args(providers.gradleProperty("mesh").getOrElse(""))
 }
 
+tasks.register<JavaExec>("cliffDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.CliffDiagnosticKt")
+  args(projectDir.parentFile.absolutePath, providers.gradleProperty("map").getOrElse(""))
+}
+
 tasks.register<JavaExec>("surfaceDiagnostic") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath

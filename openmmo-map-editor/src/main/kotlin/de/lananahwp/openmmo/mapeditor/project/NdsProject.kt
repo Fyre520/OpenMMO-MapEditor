@@ -180,11 +180,17 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       val walls =
           if (!includeWalls) emptyList()
           else {
-            // A face standing on the line between two picked squares answers to both. It is still
-            // one face, so the set keeps it once.
+            // Deliberately over the unfiltered triangles. The texture filter answers "which
+            // surface did I mean on this square", separating a path from the ground it is
+            // welded to -- a question about surfaces. A cliff face rarely shares a texture
+            // with the ground on top of it, so filtering walls by it removed the very thing
+            // that had been asked for: picking the top excluded the face and picking the face
+            // excluded the top, so the two could never be taken together.
+            // A face standing on the line between two picked squares answers to both. It is
+            // still one face, so the set keeps it once.
             val collected = LinkedHashSet<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
             for (cell in cells) {
-              collected += wallsForCell(candidates, surfaceCellX(cell), surfaceCellZ(cell))
+              collected += wallsForCell(triangles, surfaceCellX(cell), surfaceCellZ(cell))
             }
             collected.toList()
           }
@@ -220,14 +226,31 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     }
 
     /**
-     * Whether a triangle stands on the ground plane rather than lying on it.
+     * Whether a triangle stands as a wall rather than lying as a surface.
      *
-     * Cliff faces are why this matters. Selection is keyed on map squares, and a tile-aligned
-     * wall stands exactly on the line between two of them, so a strict overlap test puts it in
-     * neither: it fails "reaches into this square" from both sides at once.
+     * Measured by the tilt of its own normal, not by the area it projects onto the ground.
+     * [footprintArea] is that projected area, so testing it asks "does this cover much
+     * ground", which scales with the size of the triangle: a large cliff face leaning a
+     * little still casts a big shadow and read as a surface, while a small flat triangle cast
+     * almost none and read as a wall. On MAP_ROUTE_45 that misjudged 490 of 958 steep faces
+     * and left 1615 triangles in neither category -- too steep for a square to be rebuilt
+     * from, not flat enough to be dropped as a sliver, and never collected as a wall either.
+     * That is why a cliff came back with pieces missing however it was reselected.
+     *
+     * Cliff faces matter here because selection is keyed on map squares, and a tile-aligned
+     * wall stands exactly on the line between two of them, so a strict overlap test puts it
+     * in neither: it fails "reaches into this square" from both sides at once.
      */
-    private fun isVerticalFace(tri: de.lananahwp.openmmo.mapeditor.core.NdsTri): Boolean =
-        footprintArea(tri) < VERTICAL_FACE_AREA
+    fun isVerticalFace(tri: de.lananahwp.openmmo.mapeditor.core.NdsTri): Boolean {
+      val ux = tri.bx - tri.ax; val uy = tri.by - tri.ay; val uz = tri.bz - tri.az
+      val vx = tri.cx - tri.ax; val vy = tri.cy - tri.ay; val vz = tri.cz - tri.az
+      val nx = uy * vz - uz * vy
+      val ny = uz * vx - ux * vz
+      val nz = ux * vy - uy * vx
+      val length = kotlin.math.sqrt((nx * nx + ny * ny + nz * nz).toDouble()).toFloat()
+      if (length < 1e-9f) return false
+      return kotlin.math.abs(ny) / length < VERTICAL_FACE_TILT
+    }
 
     /**
      * The vertical faces belonging to one square, trimmed to it.
@@ -304,8 +327,12 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       return ground + grid.heightAt(layer, x, z)
     }
 
-    /** Footprint area below which a triangle counts as a wall rather than as a surface. */
-    private const val VERTICAL_FACE_AREA = 1e-4f
+    /**
+     * How far from horizontal a face must tilt to count as a wall: |normal.y| below this,
+     * which is a tilt of roughly 70 degrees. Walkable slopes stay surfaces -- a 45-degree
+     * ramp sits at 0.71, nowhere near it.
+     */
+    private const val VERTICAL_FACE_TILT = 0.35f
 
     /** Slack for "touches this square", so a face lying exactly on an edge counts as inside it. */
     private const val CELL_EDGE_EPSILON = 1e-3f

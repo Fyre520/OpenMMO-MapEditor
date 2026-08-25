@@ -31,6 +31,7 @@ fun main(args: Array<String>) {
   testTilesRestOnTheTerrainUnderThem()
   testTileSpaceKeepsItsSize()
   testWallsAreOptional()
+  testWallsAreToldByTiltNotByArea()
   testPaintedTilesRestOnTerrainOnly()
   testCtrlErasesAPaintedSquare()
 
@@ -527,6 +528,70 @@ private fun testDragTakesEverythingItCrosses() {
   // A drag from far off the map is bounded rather than walked a step at a time forever.
   val long = NdsProject.surfaceStrokeCells(-4000f, -4000f, 4000f, 4000f, 1)
   check(long.isNotEmpty() && long.size <= 513) { "an extreme drag produced ${long.size} steps" }
+}
+
+/** A triangle with the three corners given, textured as [texture]. */
+private fun triAt(
+    a: Triple<Float, Float, Float>,
+    b: Triple<Float, Float, Float>,
+    c: Triple<Float, Float, Float>,
+    texture: String = "rock",
+): NdsTri = NdsTri(
+    ax = a.first, ay = a.second, az = a.third,
+    bx = b.first, by = b.second, bz = b.third,
+    cx = c.first, cy = c.second, cz = c.third,
+    color = -1,
+    u0 = 0f, v0 = 0f, u1 = 1f, v1 = 0f, u2 = 1f, v2 = 1f,
+    texture = texture,
+    palette = "$texture-pal",
+)
+
+/**
+ * A wall is told from a surface by how far it tilts, not by how much ground it covers.
+ *
+ * The two only agree for small triangles. Projected area scales with size, so a big cliff face
+ * leaning slightly still covers plenty of ground and read as a surface, while a small flat
+ * triangle covered almost none and read as a wall. On MAP_ROUTE_45 that misjudged 490 of 958
+ * steep faces, and each one was then dropped as a sliver by the square rebuilder as well -- which
+ * is why parts of a cliff could not be selected at all, however many times they were traced over.
+ */
+private fun testWallsAreToldByTiltNotByArea() {
+  // Dead vertical: unambiguous, and a wall under either rule.
+  check(NdsProject.isVerticalFace(
+      triAt(Triple(0f, 0f, 3f), Triple(1f, 0f, 3f), Triple(1f, 2f, 3f)))) {
+    "a vertical face is not being read as a wall"
+  }
+
+  // A big cliff face leaning about 12 degrees off vertical, four tiles wide. It projects roughly
+  // 1.6 square tiles of ground -- far more than any sliver rule would forgive -- yet it is a wall.
+  val leaning = triAt(Triple(0f, 0f, 3f), Triple(4f, 0f, 3f), Triple(4f, 2f, 3.4f))
+  check(NdsProject.isVerticalFace(leaning)) {
+    "a large leaning cliff face is still being read as a surface"
+  }
+
+  // A small flat triangle covers almost no ground, but it lies down: it is a surface.
+  val speck = triAt(Triple(1f, 0f, 1f), Triple(1.05f, 0f, 1f), Triple(1.05f, 0f, 1.05f))
+  check(!NdsProject.isVerticalFace(speck)) {
+    "a small flat triangle is being read as a wall"
+  }
+
+  // A walkable ramp must stay a surface: 45 degrees sits at 0.71, nowhere near the cut.
+  val ramp = triAt(Triple(0f, 0f, 0f), Triple(2f, 0f, 0f), Triple(2f, 2f, 2f))
+  check(!NdsProject.isVerticalFace(ramp)) { "a 45-degree ramp is being read as a wall" }
+
+  // Degenerate geometry has no normal to measure and must not be called a wall on a divide by
+  // zero -- collapsed triangles do turn up in decoded map meshes.
+  val degenerate = triAt(Triple(2f, 1f, 2f), Triple(2f, 1f, 2f), Triple(2f, 1f, 2f))
+  check(!NdsProject.isVerticalFace(degenerate)) { "a collapsed triangle was called a wall" }
+
+  // And the whole point: a leaning face is reachable through selection, which is what the old
+  // rule made impossible.
+  // A square the face actually runs through, rather than one it merely ends on.
+  val ground = tileTri(1, 3, texture = "grass")
+  val cell = setOf(NdsProject.surfaceCellKey(1, 3))
+  val picked = NdsProject.filterSurfaceTriangles(
+      listOf(ground, leaning), cell, null, NdsProject.SurfaceCut.FREEFORM, null, true)
+  check(picked.any { it.texture == "rock" }) { "the leaning face could not be selected" }
 }
 
 private fun testBrushCells() {

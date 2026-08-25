@@ -2575,7 +2575,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       ndsSurfaceCells += rebuilt
       // A box sweep only knows the height under the pointer, so every square it adds takes that
       // one. It is the surface the user was tracing along, which is what they mean by the sweep.
-      if (!ndsSurfaceErasing) hit.surfaceY?.let { y -> for (cell in box) ndsSurfacePickedHeights[cell] = y }
+      // Squares already in the selection keep the surface they were picked with; see below.
+      if (!ndsSurfaceErasing) {
+        hit.surfaceY?.let { y -> for (cell in box) ndsSurfacePickedHeights.putIfAbsent(cell, y) }
+      }
     } else {
       // Take what the pointer crossed, not only where it was sampled: samples are sparse
       // because each one ray-tests the whole model, so marking just them left a dotted trail
@@ -2591,8 +2594,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         val toY = hit.surfaceY
         if (toY != null) {
           // Height follows the trail as well, so dragging up a slope keeps tracking it.
+          //
+          // First pick wins, and that matters: this height decides which of the surfaces
+          // stacked over a square gets rebuilt. Overwriting it meant running the cursor back
+          // over a square moved it to whatever was under the pointer this time, so tracing the
+          // top of a cliff and then its base swapped the tops for the ground rather than
+          // adding to them -- the selection kept losing what had just been picked, and the
+          // whole structure could never be held at once. Ctrl+drag releases a square to pick
+          // it again on a different surface.
           val fromY = ndsSurfaceLastY ?: toY
-          for ((cell, t) in trail) ndsSurfacePickedHeights[cell] = fromY + (toY - fromY) * t
+          for ((cell, t) in trail) {
+            ndsSurfacePickedHeights.putIfAbsent(cell, fromY + (toY - fromY) * t)
+          }
         }
       }
     }
