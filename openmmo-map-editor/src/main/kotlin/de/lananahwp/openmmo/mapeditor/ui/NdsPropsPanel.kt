@@ -38,7 +38,7 @@ class NdsPropsPanel(
     private val onDuplicate: () -> Unit,
     private val onMerge: () -> Unit,
     private val onShowAllNdsPropsChanged: (Boolean) -> Unit,
-    private val onChanged: () -> Unit,
+    private val onChanged: (NdsProp) -> Unit,
 ) : JPanel(BorderLayout(6, 6)) {
   private val search = JTextField()
   private val catalog = JComboBox<NdsProject.PropModelInfo>()
@@ -159,7 +159,11 @@ class NdsPropsPanel(
 
   fun setModels(models: List<NdsProject.PropModelInfo>) {
     allModels = models
-    modelLabels = models.associate { it.key to it.label }
+    // Native entries are supplied first. Keep their labels when another game reuses the same
+    // rom:<id>; foreign catalog identity is carried separately by catalogId.
+    modelLabels = buildMap {
+      for (model in models) putIfAbsent(model.key, model.label)
+    }
     applyCatalogFilter()
   }
 
@@ -190,6 +194,11 @@ class NdsPropsPanel(
     }
   }
 
+  /** Selects the first catalog entry for a placed model; native models precede foreign aliases. */
+  private fun selectModelForKey(modelKey: String) {
+    val model = allModels.firstOrNull { it.key == modelKey } ?: return
+    selectModel(model.catalogId)
+  }
   fun setMap(map: NdsMap?) {
     this.map = map
     selectedIds.clear()
@@ -228,6 +237,7 @@ class NdsPropsPanel(
     syncing = false
     setTransformEnabled(prop != null)
     mergeButton.isEnabled = selectedIds.size >= 2
+    prop?.let { selectModelForKey(it.modelKey) }
     if (notify) onSelect(selectedIds, primaryId)
   }
 
@@ -247,12 +257,13 @@ class NdsPropsPanel(
   private fun applyTransform() {
     if (syncing) return
     val prop = map?.props?.firstOrNull { it.id == primaryId } ?: return
+    val before = prop.copy()
     prop.x = number(x); prop.y = number(y); prop.z = number(z)
     prop.rotationX = number(rx); prop.rotationY = number(ry); prop.rotationZ = number(rz)
     prop.scaleX = number(sx); prop.scaleY = number(sy); prop.scaleZ = number(sz)
     val index = propIds.indexOf(prop.id)
     if (index >= 0) listModel[index] = label(index, prop)
-    onChanged()
+    onChanged(before)
   }
 
   private fun refreshPreview() {

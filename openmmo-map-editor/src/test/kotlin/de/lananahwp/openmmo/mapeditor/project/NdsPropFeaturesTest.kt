@@ -65,7 +65,10 @@ class NdsPropFeaturesTest {
       val second = project.installForeignProp(source, snapshot)
       assertEquals("foreign:platinum:7", first.key)
       assertEquals(first.key, second.key)
-      assertTrue(project.propModels().any { it.key == first.key })
+      val reloaded = NdsProject(root).propModels().single { it.key == first.key }
+      assertTrue(reloaded.imported)
+      assertEquals(NdsFamily.PLATINUM, reloaded.sourceFamily)
+      assertEquals("rom:7", reloaded.sourceModelKey)
       assertEquals(1, project.propModelPreview(first.key, null).triangles.size)
     } finally {
       root.deleteRecursively()

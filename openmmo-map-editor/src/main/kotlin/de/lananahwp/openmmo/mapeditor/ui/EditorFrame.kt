@@ -15,6 +15,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsEditHistory
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import de.lananahwp.openmmo.mapeditor.model.NdsGridStep
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
+import de.lananahwp.openmmo.mapeditor.model.NdsProp
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneSnapshot
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneStep
 import de.lananahwp.openmmo.mapeditor.model.NdsUndoStep
@@ -64,6 +65,7 @@ import javax.swing.JTree
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import javax.swing.SwingWorker
+import javax.swing.Timer
 import javax.swing.DefaultListModel
 import javax.swing.JSpinner
 import javax.swing.SpinnerNumberModel
@@ -301,6 +303,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsPropLibraries = HashMap<de.lananahwp.openmmo.mapeditor.core.NdsFamily, NdsPropLibrary>()
   private val ndsPropLibrariesLoading = HashSet<de.lananahwp.openmmo.mapeditor.core.NdsFamily>()
   private var showAllNdsProps = false
+  private var ndsNumericTransformBefore: NdsSceneSnapshot? = null
+  private var ndsNumericTransformMap: NdsMap? = null
+  private val ndsNumericTransformTimer = Timer(400) { commitNdsNumericTransform() }.apply {
+    isRepeats = false
+  }
   private val ndsPropsPanel = NdsPropsPanel(
       onImport = { importNdsPropModel() },
       onPlace = { beginNdsPropPlacement(it) },
@@ -313,7 +320,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         showAllNdsProps = it
         rebuildNdsPropCatalog()
       },
-      onChanged = { onNdsPropTransformChanged() },
+      onChanged = { before -> onNdsPropTransformChanged(before) },
   )
 
   private val groupsSearch = JTextField()
@@ -1350,6 +1357,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       return
     }
     currentHolder = ref.holder
+    discardNdsNumericTransform()
     currentMap = map
     currentRef = ref
     currentNdsHolder = null
@@ -1429,6 +1437,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           this, "Cannot load DS map ${ref.name}", "Load failed", JOptionPane.WARNING_MESSAGE)
       return
     }
+    discardNdsNumericTransform()
     currentNdsHolder = ref.holder
     currentNdsMap = map
     currentNdsRef = ref
@@ -2941,7 +2950,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       current?.propModelPreview(info.sourceModelKey, currentNdsMap)
           ?: NdsProject.PropModelPreview(emptyList(), emptyMap(), emptyMap())
     } else {
+      // A loaded library is authoritative and can replace an older project-local snapshot.
+      // Without it, keep already-installed foreign props usable while Show all is off.
       ndsPropLibraries[foreign]?.preview(info)
+          ?: current?.propModelPreview(info.key, currentNdsMap)
           ?: NdsProject.PropModelPreview(emptyList(), emptyMap(), emptyMap())
     }
   }
@@ -2997,10 +3009,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           info.sourceModelKey
         } else {
           val library = ndsPropLibraries[foreign]
-              ?: error("The ${foreign.displayName} prop library is not loaded")
-          val snapshot = library.snapshot(info)
-              ?: error("The cached prop ${info.label} could not be read")
-          holder.project.installForeignProp(info, snapshot).key
+          if (library == null) {
+            // This is an already-installed local entry being used without Show all enabled.
+            info.key.takeIf { holder.project.propModelPreview(it, map).triangles.isNotEmpty() }
+                ?: error("The ${foreign.displayName} prop library is not loaded")
+          } else {
+            val snapshot = library.snapshot(info)
+                ?: error("The cached prop ${info.label} could not be read")
+            holder.project.installForeignProp(info, snapshot).key
+          }
         }
         val prop = holder.project.createProp(
             modelKey,
@@ -3026,6 +3043,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun selectNdsProp(id: String?) = selectNdsProps(id?.let(::setOf).orEmpty(), id)
 
   private fun selectNdsProps(ids: Set<String>, primary: String?) {
+    commitNdsNumericTransform()
     val map = currentNdsMap ?: return
     selectedNdsPropIds.clear()
     selectedNdsPropIds += ids.filter { candidate -> map.props.any { it.id == candidate } }
@@ -3150,10 +3168,40 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
   }
 
-  private fun onNdsPropTransformChanged() {
-    if (currentNdsMap == null) return
+  private fun onNdsPropTransformChanged(beforeProp: NdsProp) {
+    val map = currentNdsMap ?: return
+    if (ndsNumericTransformBefore == null || ndsNumericTransformMap !== map) {
+      commitNdsNumericTransform()
+      val current = NdsSceneSnapshot.of(map)
+      ndsNumericTransformBefore = NdsSceneSnapshot(
+          props = current.props.map { if (it.id == beforeProp.id) beforeProp.copy() else it },
+          removals = current.removals,
+          transforms = current.transforms,
+          collision = current.collision,
+      )
+      ndsNumericTransformMap = map
+    }
+    ndsNumericTransformTimer.restart()
     markDirty()
     refreshNdsPropGeometry(refreshTextures = false)
+  }
+
+  /** Records a burst of spinner/typed transform changes as one undoable scene edit. */
+  private fun commitNdsNumericTransform() {
+    ndsNumericTransformTimer.stop()
+    val before = ndsNumericTransformBefore
+    val map = ndsNumericTransformMap
+    ndsNumericTransformBefore = null
+    ndsNumericTransformMap = null
+    if (before != null && map != null && currentNdsMap === map) {
+      ndsHistory.recordScene("change prop transform", before, NdsSceneSnapshot.of(map))
+    }
+  }
+
+  private fun discardNdsNumericTransform() {
+    ndsNumericTransformTimer.stop()
+    ndsNumericTransformBefore = null
+    ndsNumericTransformMap = null
   }
 
   private fun refreshNdsPropGeometry(refreshTextures: Boolean) {
@@ -3227,6 +3275,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
    * scene as it found it records nothing, so a bail-out costs only the comparison.
    */
   private inline fun recordNdsSceneChange(label: String, act: () -> Unit) {
+    commitNdsNumericTransform()
     val map = currentNdsMap ?: return
     val before = NdsSceneSnapshot.of(map)
     try {
@@ -3246,6 +3295,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (ndsSnapToGridCheck.isSelected) kotlin.math.round(value) else value
 
   private fun undoNds() {
+    commitNdsNumericTransform()
     val map = currentNdsMap ?: return
     val step = ndsHistory.undo(map)
     if (step == null) {
@@ -3256,6 +3306,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun redoNds() {
+    commitNdsNumericTransform()
     val map = currentNdsMap ?: return
     val step = ndsHistory.redo(map)
     if (step == null) {

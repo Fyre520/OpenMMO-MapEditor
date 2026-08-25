@@ -1531,6 +1531,48 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     narcFiles(path)
   }
 
+  private data class RomPropDefaultScale(val x: Float, val y: Float, val z: Float)
+
+  /** Most common source-game placement dimensions for every built-in model. */
+  private val romPropDefaultScales: Map<Int, RomPropDefaultScale> by lazy {
+    val platinum = family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.PLATINUM
+    val landDataPath = if (platinum) "fielddata/land_data/land_data.narc" else "a/0/6/5"
+    val dimensionsByModel = LinkedHashMap<Int, LinkedHashMap<Triple<Int, Int, Int>, Int>>()
+    for (entry in narcFiles(landDataPath).orEmpty()) {
+      val data = de.lananahwp.openmmo.mapeditor.core.NdsMapData.parse(
+          entry, hasBgs = !platinum) ?: continue
+      for (building in data.buildings) {
+        if (building.width <= 0 || building.height <= 0 || building.length <= 0) continue
+        val dimensions = Triple(building.width, building.height, building.length)
+        val counts = dimensionsByModel.getOrPut(building.modelId) { LinkedHashMap() }
+        counts[dimensions] = (counts[dimensions] ?: 0) + 1
+      }
+    }
+    buildMap {
+      for ((modelId, counts) in dimensionsByModel) {
+        val dimensions = counts.maxByOrNull { it.value }?.key ?: continue
+        val model = buildModelFiles?.getOrNull(modelId) ?: continue
+        val modelScale = de.lananahwp.openmmo.mapeditor.core.NdsNsbmd.modelScaleOf(model)
+        if (modelScale <= 0f) continue
+        val base = modelScale / 256f
+        put(modelId, RomPropDefaultScale(
+            base * dimensions.first,
+            base * dimensions.second,
+            base * dimensions.third,
+        ))
+      }
+    }
+  }
+
+  /** Source-game scale for a newly placed built-in prop, with the renderer default as fallback. */
+  private fun romPropDefaultScale(modelKey: String): RomPropDefaultScale? {
+    val modelId = modelKey.removePrefix("rom:").toIntOrNull() ?: return null
+    romPropDefaultScales[modelId]?.let { return it }
+    val model = buildModelFiles?.getOrNull(modelId) ?: return null
+    val scale = de.lananahwp.openmmo.mapeditor.core.NdsNsbmd.modelScaleOf(model) / 64f
+    return scale.takeIf { it > 0f }?.let { RomPropDefaultScale(it, it, it) }
+  }
+
   /**
    * Decodes the placed buildings/objects on the map into triangles, using DSPRE's
    * ScaleTranslateRotateBuilding transform. Buildings have their own model ids and a
@@ -1760,12 +1802,32 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     return out
   }
 
-  /** Normalized, grounded ROM geometry for a disk-backed foreign prop library. */
+  /** Source-sized, grounded ROM geometry for a disk-backed cross-family prop library. */
   fun portablePropSnapshot(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? {
-    val prop = try { createProp(modelKey, 0f, 0f) } catch (_: Throwable) { return null }
-    val triangles = transformedPropTriangles(prop, namespaceTextures = false)
-        .map { it.copy(editGroup = "") }
-    if (triangles.isEmpty()) return null
+    val raw = propModelTriangles(modelKey)
+    val scale = romPropDefaultScale(modelKey) ?: return null
+    val sourceSized = raw.map { triangle ->
+      triangle.copy(
+          ax = triangle.ax * scale.x,
+          ay = triangle.ay * scale.y,
+          az = triangle.az * scale.z,
+          bx = triangle.bx * scale.x,
+          by = triangle.by * scale.y,
+          bz = triangle.bz * scale.z,
+          cx = triangle.cx * scale.x,
+          cy = triangle.cy * scale.y,
+          cz = triangle.cz * scale.z,
+      )
+    }
+    val bounds = boundsOf(sourceSized) ?: return null
+    val triangles = sourceSized.map { triangle ->
+      triangle.copy(
+          ay = triangle.ay - bounds.minY,
+          by = triangle.by - bounds.minY,
+          cy = triangle.cy - bounds.minY,
+          editGroup = "",
+      )
+    }
     val preview = propModelPreview(modelKey, null)
     return de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot(
         triangles, preview.textures, preview.palettes)
@@ -2143,11 +2205,18 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
             val meshBacked = File(dir, "mesh.bin").isFile
             val payload = if (meshBacked) File(dir, "mesh.bin") else File(dir, "model.nsbmd")
             if (!payload.isFile) return@mapNotNull null
+            val key = o.str("key") ?: dir.name
+            val sourceFamily = o.str("sourceFamily")?.let { saved ->
+              de.lananahwp.openmmo.mapeditor.core.NdsFamily.entries
+                  .firstOrNull { it.name == saved }
+            }
             PropModelInfo(
-                o.str("key") ?: dir.name,
+                key,
                 o.str("label") ?: dir.name,
                 true,
                 o.str("category") ?: if (meshBacked) EXTRACTED_CATEGORY else "Imported",
+                sourceFamily = sourceFamily,
+                sourceModelKey = o.str("sourceModelKey") ?: key,
             )
           } catch (_: Throwable) {
             null
@@ -2231,29 +2300,33 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     return PropModelInfo(key, manifest.str("label")!!, true, "Imported")
   }
 
-  /** Creates a grounded one-tile prop placement from a catalog entry. */
+  /** Creates a grounded prop placement from a catalog entry. */
   fun createProp(modelKey: String, x: Float, z: Float): NdsProp {
     val raw = propModelTriangles(modelKey)
     require(raw.isNotEmpty()) { "The selected prop model contains no supported geometry" }
     val b = boundsOf(raw) ?: error("The selected prop has no bounds")
-    // An arbitrary NSBMD import has no meaningful relationship to tile size, so it gets normalised
-    // to a single tile. Extracted geometry was already measured in map tiles when it was lifted,
-    // so scaling it would shrink a 3x3 patch of path down to one square.
-    val scale = if (meshSnapshot(modelKey) != null) {
-      1f
-    } else {
-      val span = maxOf(b.maxX - b.minX, b.maxZ - b.minZ, 0.0001f)
-      1f / span
+    val scale = when {
+      // Extracted, merged, and cross-family ROM snapshots already use map-tile coordinates.
+      meshSnapshot(modelKey) != null -> RomPropDefaultScale(1f, 1f, 1f)
+      // Native HGSS/Platinum models use the most common dimensions in their ROM placements.
+      modelKey.startsWith("rom:") ->
+          romPropDefaultScale(modelKey) ?: RomPropDefaultScale(1f, 1f, 1f)
+      // An arbitrary external NSBMD has no known relationship to tile size, so keep the
+      // existing one-tile normalization rule for imports outside the two supported ROMs.
+      else -> {
+        val normalized = 1f / maxOf(b.maxX - b.minX, b.maxZ - b.minZ, 0.0001f)
+        RomPropDefaultScale(normalized, normalized, normalized)
+      }
     }
     return NdsProp(
         id = "prop-${System.currentTimeMillis()}-${(Math.random() * 1_000_000).toInt()}",
         modelKey = modelKey,
         x = x,
-        y = -b.minY * scale,
+        y = -b.minY * scale.y,
         z = z,
-        scaleX = scale,
-        scaleY = scale,
-        scaleZ = scale,
+        scaleX = scale.x,
+        scaleY = scale.y,
+        scaleZ = scale.z,
     )
   }
 

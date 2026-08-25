@@ -36,7 +36,9 @@ class NdsPropLibrary private constructor(
       NdsMeshSnapshot.read(modelFile(cacheDir, info.sourceModelKey))
 
   companion object {
-    private const val CACHE_VERSION = 1
+    // Version 3 includes each model's usual ROM placement dimensions as well as its NSBMD
+    // scale, rather than normalising cross-family models or assuming a 4/4/4 placement.
+    private const val CACHE_VERSION = 3
     private const val PREVIEW_CACHE_SIZE = 12
 
     fun cacheRoot(): File = File(
