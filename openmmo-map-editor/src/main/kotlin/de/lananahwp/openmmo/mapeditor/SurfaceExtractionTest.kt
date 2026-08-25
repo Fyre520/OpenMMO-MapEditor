@@ -19,6 +19,7 @@ import java.nio.file.Files
  */
 fun main(args: Array<String>) {
   testBrushCells()
+  testDragTakesEverythingItCrosses()
   testRectCells()
   testTriangleFiltering()
   testOversizedTriangleIsClipped()
@@ -480,6 +481,52 @@ private fun testWallsAreOptional() {
       triangles, bothCells, cut = free, includeWalls = true)
   val sharedWalls = shared.count { it.texture == "rock" }
   check(sharedWalls == 1) { "the shared wall was taken $sharedWalls times, expected once" }
+}
+
+/**
+ * A drag takes every square it crosses, not only the ones it was sampled on.
+ *
+ * Pointer samples are discrete, and on the 3D views expensive enough to arrive far apart while the
+ * pointer is moving. Marking only the samples left holes between them, which made covering a whole
+ * cliff by dragging over it impossible: parts of it simply never got selected.
+ */
+private fun testDragTakesEverythingItCrosses() {
+  // A straight run of five squares: every square between the ends comes along.
+  val straight = NdsProject.surfaceStrokeCells(2.5f, 7.5f, 7.5f, 7.5f, 1)
+  val expected = (2..7).map { NdsProject.surfaceCellKey(it, 7) }.toSet()
+  check(straight.keys == expected) {
+    "a straight drag missed squares: ${expected - straight.keys}"
+  }
+
+  // Each square is stamped with how far along the drag it was first entered, which is what
+  // lets the caller follow the surface height across the trail. A square is entered before
+  // the pointer finishes crossing it, so the last one is reached shortly before the end.
+  check(straight.getValue(NdsProject.surfaceCellKey(2, 7)) == 0f) { "the trail should start at 0" }
+  val ts = (2..7).map { straight.getValue(NdsProject.surfaceCellKey(it, 7)) }
+  check(ts == ts.sorted()) { "the trail should run in order along the drag, got $ts" }
+  check(ts.all { it in 0f..1f }) { "the trail left the segment: $ts" }
+  check(ts.last() > 0.8f) { "the far end of the trail sits at ${ts.last()}" }
+
+  // A diagonal must come back connected: every square touching the next by an edge or a corner,
+  // with nothing skipped over in between.
+  val diagonal = NdsProject.surfaceStrokeCells(0.5f, 0.5f, 6.5f, 6.5f, 1)
+  val cells = diagonal.keys.map { NdsProject.surfaceCellX(it) to NdsProject.surfaceCellZ(it) }
+  for (x in 0..6) {
+    check((x to x) in cells) { "the diagonal skipped square ($x, $x)" }
+  }
+
+  // One sample on its own still marks the square under it.
+  val still = NdsProject.surfaceStrokeCells(3.2f, 4.8f, 3.2f, 4.8f, 1)
+  check(still.keys == setOf(NdsProject.surfaceCellKey(3, 4))) { "a still pointer marked $still" }
+
+  // The brush widens the trail rather than replacing it.
+  val wide = NdsProject.surfaceStrokeCells(2.5f, 7.5f, 7.5f, 7.5f, 3)
+  check(wide.keys.containsAll(expected)) { "a wider brush dropped the line it was drawn along" }
+  check(wide.keys.size > expected.size * 2) { "a 3-wide brush covered only ${wide.keys.size}" }
+
+  // A drag from far off the map is bounded rather than walked a step at a time forever.
+  val long = NdsProject.surfaceStrokeCells(-4000f, -4000f, 4000f, 4000f, 1)
+  check(long.isNotEmpty() && long.size <= 513) { "an extreme drag produced ${long.size} steps" }
 }
 
 private fun testBrushCells() {

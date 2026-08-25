@@ -97,6 +97,45 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
       return out
     }
 
+    /**
+     * Every brush square along the segment between two pointer samples, each mapped to how far
+     * along that segment it was first touched.
+     *
+     * Pointer samples are discrete, and in the 3D views expensive -- every one ray-tests the
+     * whole model -- so they arrive far apart while a drag is moving. Marking only the samples
+     * left a dotted trail of squares with holes between them, which is no way to select a
+     * cliff; walking the segment is what makes a drag take what it actually crossed. The
+     * parameter comes back so the caller can follow the surface height along the trail too.
+     */
+    fun surfaceStrokeCells(
+        fromX: Float,
+        fromZ: Float,
+        toX: Float,
+        toZ: Float,
+        size: Int,
+    ): Map<Long, Float> {
+      val distance = kotlin.math.hypot((toX - fromX).toDouble(), (toZ - fromZ).toDouble())
+      // Half a square per step: close enough that no square between two samples is stepped
+      // over, whichever direction the drag runs in.
+      val steps = kotlin.math.ceil(distance / 0.5).toInt().coerceIn(0, MAX_STROKE_STEPS)
+      val out = LinkedHashMap<Long, Float>()
+      for (step in 0..steps) {
+        val t = if (steps == 0) 1f else step.toFloat() / steps
+        val cells = surfaceBrushCells(fromX + (toX - fromX) * t, fromZ + (toZ - fromZ) * t, size)
+        for (cell in cells) out.putIfAbsent(cell, t)
+      }
+      return out
+    }
+
+    /**
+     * Ceiling on the steps one drag event is walked in.
+     *
+     * A sample can land a long way from the last one -- the pointer leaving the mesh and coming
+     * back, or the camera moving under it -- and that should not turn one event into thousands
+     * of brush evaluations.
+     */
+    private const val MAX_STROKE_STEPS = 512
+
     /** Every tile in the rectangle spanned by two map-space corners. */
     fun surfaceRectCells(x0: Float, z0: Float, x1: Float, z1: Float): Set<Long> {
       val minX = kotlin.math.floor(minOf(x0, x1).toDouble()).toInt()

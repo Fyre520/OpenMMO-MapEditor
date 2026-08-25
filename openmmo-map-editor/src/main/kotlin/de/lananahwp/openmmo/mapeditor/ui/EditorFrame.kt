@@ -278,6 +278,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var ndsSurfaceBoxAnchorX: Float? = null
   private var ndsSurfaceBoxAnchorZ: Float? = null
   private var ndsSurfaceBoxBaseCells: Set<Long> = emptySet()
+  // Where the current drag last resolved on the mesh, so the squares between two pointer
+  // samples can be filled in. Null between strokes.
+  private var ndsSurfaceLastX: Float? = null
+  private var ndsSurfaceLastZ: Float? = null
+  private var ndsSurfaceLastY: Float? = null
   private var ndsSurfaceErasing = false
 
   private var selectedNdsPropId: String? = null
@@ -2540,6 +2545,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
     if (!dragging) {
       ndsSurfaceErasing = hit.ctrlDown
+      // A new stroke starts its trail here rather than continuing from wherever the last one
+      // ended, which would sweep in everything between the two.
+      ndsSurfaceLastX = null
+      ndsSurfaceLastZ = null
+      ndsSurfaceLastY = null
       // A fresh click on bare geometry re-arms the texture filter from whatever was clicked.
       if (!hit.ctrlDown && hit.surfaceTexture != null && ndsSurfaceCells.isEmpty()) {
         ndsSurfaceTextureFilter = hit.surfaceTexture.takeIf { it.isNotEmpty() }
@@ -2567,15 +2577,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       // one. It is the surface the user was tracing along, which is what they mean by the sweep.
       if (!ndsSurfaceErasing) hit.surfaceY?.let { y -> for (cell in box) ndsSurfacePickedHeights[cell] = y }
     } else {
-      val brush = NdsProject.surfaceBrushCells(x, z, (ndsSurfaceBrushSpinner.value as Number).toInt())
+      // Take what the pointer crossed, not only where it was sampled: samples are sparse
+      // because each one ray-tests the whole model, so marking just them left a dotted trail
+      // of squares with holes between them -- impossible to select a cliff with.
+      val size = (ndsSurfaceBrushSpinner.value as Number).toInt()
+      val trail = NdsProject.surfaceStrokeCells(
+          ndsSurfaceLastX ?: x, ndsSurfaceLastZ ?: z, x, z, size)
       if (ndsSurfaceErasing) {
-        ndsSurfaceCells -= brush
-        ndsSurfacePickedHeights.keys -= brush
+        ndsSurfaceCells -= trail.keys
+        ndsSurfacePickedHeights.keys -= trail.keys
       } else {
-        ndsSurfaceCells += brush
-        hit.surfaceY?.let { y -> for (cell in brush) ndsSurfacePickedHeights[cell] = y }
+        ndsSurfaceCells += trail.keys
+        val toY = hit.surfaceY
+        if (toY != null) {
+          // Height follows the trail as well, so dragging up a slope keeps tracking it.
+          val fromY = ndsSurfaceLastY ?: toY
+          for ((cell, t) in trail) ndsSurfacePickedHeights[cell] = fromY + (toY - fromY) * t
+        }
       }
     }
+    ndsSurfaceLastX = x
+    ndsSurfaceLastZ = z
+    hit.surfaceY?.let { ndsSurfaceLastY = it }
 
     ndsSurfacePickedHeights.keys.retainAll(ndsSurfaceCells)
     if (ndsSurfaceCells.isEmpty()) ndsSurfaceTextureFilter = null
@@ -2622,6 +2645,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsSurfaceBoxAnchorZ = null
     ndsSurfaceBoxBaseCells = emptySet()
     ndsSurfaceErasing = false
+    ndsSurfaceLastX = null
+    ndsSurfaceLastZ = null
+    ndsSurfaceLastY = null
     refreshNdsSurfaceHighlight()
   }
 
