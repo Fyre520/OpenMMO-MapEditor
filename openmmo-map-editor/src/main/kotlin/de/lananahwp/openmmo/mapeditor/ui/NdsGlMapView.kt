@@ -8,6 +8,7 @@ import com.jogamp.opengl.GLProfile
 import com.jogamp.opengl.awt.GLCanvas
 import com.jogamp.opengl.glu.GLU
 import de.lananahwp.openmmo.mapeditor.core.NdsTexture
+import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.core.NdsTileset
 import de.lananahwp.openmmo.mapeditor.core.TileShape
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
@@ -36,6 +37,8 @@ class NdsGlMapView(
      * per-cell callback cannot do: it never learns where one stroke ends and the next begins.
      */
     private val onStrokeBegin: () -> Unit = {},
+    /** Reports the map square under the pointer, or null when the pointer leaves the map. */
+    private val onHoverCell: (Pair<Int, Int>?) -> Unit = {},
 ) : GLCanvas(GLCapabilities(GLProfile.get(GLProfile.GL2))), GLEventListener, Nds3DView {
 
   enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
@@ -70,6 +73,8 @@ class NdsGlMapView(
 
   override var activeLayer = 0
   override var activeTile = 0
+  override var activeTileWidth = 1
+  override var activeTileHeight = 1
   override var activeHeight = 0
   override var brushSize = 1
     set(value) {
@@ -132,6 +137,11 @@ class NdsGlMapView(
       field = value.coerceIn(0f, 1f)
       repaint()
     }
+  override var propOpacity: Float = 1f
+    set(value) {
+      field = value.coerceIn(0f, 1f)
+      repaint()
+    }
 
   var yaw = 45.0
   var pitch = 30.0
@@ -170,6 +180,10 @@ class NdsGlMapView(
           override fun mouseReleased(e: MouseEvent) {
             cursor = Cursor.getDefaultCursor()
           }
+
+          override fun mouseExited(e: MouseEvent) {
+            setHoverCell(null)
+          }
         })
     addMouseMotionListener(
         object : MouseAdapter() {
@@ -196,25 +210,33 @@ class NdsGlMapView(
               val hit =
                   if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
                   else pointerHit(e.x, e.y, includeModelGroup = false)
-              if (hit == null) return
-              if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
+              if (hit != null &&
+                  !onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
+            updateHoverCell(e.x, e.y)
           }
 
           override fun mouseMoved(e: MouseEvent) {
-            val cell = pickCell(e.x, e.y)
-            if (cell != hoverCell) {
-              hoverCell = cell
-              repaint()
-            }
+            updateHoverCell(e.x, e.y)
           }
         })
     addMouseWheelListener { e: MouseWheelEvent ->
       distance = (distance * (if (e.wheelRotation < 0) 0.9 else 1.1)).coerceIn(8.0, 220.0)
       repaint()
     }
+  }
+
+  private fun updateHoverCell(screenX: Int, screenY: Int) {
+    setHoverCell(pickCell(screenX, screenY))
+  }
+
+  private fun setHoverCell(cell: Pair<Int, Int>?) {
+    if (cell == hoverCell) return
+    hoverCell = cell
+    onHoverCell(cell)
+    repaint()
   }
 
   private fun paint(x: Int, z: Int, erase: Boolean) {
@@ -371,7 +393,8 @@ class NdsGlMapView(
     val hoverAlpha = if (paintMode == PaintMode.ELEVATION) 0.78f else 0.35f
     gl.glColor4f(1f, 0.9f, 0.18f, hoverAlpha)
     gl.glBegin(GL2.GL_QUADS)
-    for ((cx, cz) in ndsBrushFootprint(hx, hz, brushSize, g.cols, g.rows)) {
+    for ((cx, cz) in ndsTileStampFootprint(
+        hx, hz, brushSize, activeTileWidth, activeTileHeight, g.cols, g.rows)) {
       val terrain = surface?.get(cx)?.get(cz)?.takeIf { !it.isNaN() } ?: 0.0
       val top = ndsPaintCursorHeight(
           g, cx, cz, activeLayer, terrain, modelScale, customTileGeometry) + 0.08
@@ -570,8 +593,17 @@ class NdsGlMapView(
 
   private fun drawModel(gl: GL2) {
     if (modelTriangles.isEmpty() || modelOpacity <= 0f) return
-    val xf = modelXform() ?: return
-    val translucent = modelOpacity < 0.999f
+    modelXform() ?: return
+    // Opaque terrain first, translucent props second. The latter do not write depth, allowing
+    // painted tiles drawn immediately afterwards to remain visible through them.
+    drawModelPass(gl, modelTriangles.filterNot { it.editGroup.startsWith("prop:") }, modelOpacity)
+    drawModelPass(gl, modelTriangles.filter { it.editGroup.startsWith("prop:") },
+        (modelOpacity * propOpacity).coerceIn(0f, 1f))
+  }
+
+  private fun drawModelPass(gl: GL2, triangles: List<NdsTri>, opacity: Float) {
+    if (triangles.isEmpty() || opacity <= 0f) return
+    val translucent = opacity < 0.999f
     gl.glEnable(GL2.GL_TEXTURE_2D)
     gl.glDisable(GL2.GL_LIGHTING)
     // DS renders textured pixels as opaque-or-invisible (alpha test), not blended.
@@ -588,7 +620,7 @@ class NdsGlMapView(
     var boundWrapS = Int.MIN_VALUE
     var boundWrapT = Int.MIN_VALUE
     var texturingOn = false
-    for (tri in modelTriangles) {
+    for (tri in triangles) {
       val texId =
           if (tri.texture.isNotEmpty()) glTextureId(gl, tri.texture, tri.palette) else -1
       // Triangles whose texture is missing/empty must NOT sample the default (white) texture:
@@ -623,7 +655,7 @@ class NdsGlMapView(
       val color = Color(tri.color, true)
       // Modulate with the material's diffuse color (DSPRE uses this as glColor), which
       // darkens the mint palette colors to the correct in-game look.
-      gl.glColor4f(color.red / 255f, color.green / 255f, color.blue / 255f, modelOpacity)
+      gl.glColor4f(color.red / 255f, color.green / 255f, color.blue / 255f, opacity)
       gl.glBegin(GL2.GL_TRIANGLES)
       vertex(gl, tri.ax, tri.ay, tri.az, tri.u0, tri.v0, tw, th, texId != -1, tri.scaleS, tri.scaleT)
       vertex(gl, tri.bx, tri.by, tri.bz, tri.u1, tri.v1, tw, th, texId != -1, tri.scaleS, tri.scaleT)

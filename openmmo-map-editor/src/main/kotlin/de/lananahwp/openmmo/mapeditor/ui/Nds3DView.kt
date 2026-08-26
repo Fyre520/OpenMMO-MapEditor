@@ -414,8 +414,12 @@ interface Nds3DView {
   var modelTextures: Map<String, NdsTexture>
   var modelPalettes: Map<String, IntArray>
   var modelOpacity: Float
+  /** Additional opacity applied only to placed prop geometry (`prop:*` edit groups). */
+  var propOpacity: Float
   var activeLayer: Int
   var activeTile: Int
+  var activeTileWidth: Int
+  var activeTileHeight: Int
   var activeHeight: Int
   /** Width and depth, in map squares, of the paint cursor and one paint operation. */
   var brushSize: Int
@@ -451,6 +455,10 @@ interface Nds3DView {
   fun asComponent(): Component
 }
 
+internal fun ndsTriangleOpacity(triangle: NdsTri, modelOpacity: Float, propOpacity: Float): Float =
+    (modelOpacity * if (triangle.editGroup.startsWith("prop:")) propOpacity else 1f)
+        .coerceIn(0f, 1f)
+
 /** Cells covered by a square brush, matching NdsProject.surfaceBrushCells' centering rule. */
 internal fun ndsBrushFootprint(
     x: Int,
@@ -470,6 +478,27 @@ internal fun ndsBrushFootprint(
     }
   }
 }
+
+/** Union of every multi-square tile stamp placed by the current brush anchors. */
+internal fun ndsTileStampFootprint(
+    x: Int,
+    z: Int,
+    brushSize: Int,
+    tileWidth: Int,
+    tileHeight: Int,
+    cols: Int,
+    rows: Int,
+): List<Pair<Int, Int>> = buildSet {
+  for ((anchorX, anchorZ) in ndsBrushFootprint(x, z, brushSize, cols, rows)) {
+    for (dz in 0 until tileHeight.coerceAtLeast(1)) {
+      for (dx in 0 until tileWidth.coerceAtLeast(1)) {
+        val cellX = anchorX + dx
+        val cellZ = anchorZ + dz
+        if (cellX in 0 until cols && cellZ in 0 until rows) add(cellX to cellZ)
+      }
+    }
+  }
+}.toList()
 
 /** Render-space top of the tile being edited in one cell. */
 internal fun ndsPaintCursorHeight(

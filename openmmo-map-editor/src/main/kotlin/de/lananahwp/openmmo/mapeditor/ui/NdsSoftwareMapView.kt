@@ -41,6 +41,8 @@ class NdsSoftwareMapView(
      * per-cell callback cannot do: it never learns where one stroke ends and the next begins.
      */
     private val onStrokeBegin: () -> Unit = {},
+    /** Reports the map square under the pointer, or null when the pointer leaves the map. */
+    private val onHoverCell: (Pair<Int, Int>?) -> Unit = {},
 ) : JPanel(), Nds3DView {
 
   enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
@@ -72,6 +74,8 @@ class NdsSoftwareMapView(
 
   override var activeLayer = 0
   override var activeTile = 0
+  override var activeTileWidth = 1
+  override var activeTileHeight = 1
   override var activeHeight = 0
   override var brushSize = 1
     set(value) {
@@ -155,6 +159,11 @@ class NdsSoftwareMapView(
       field = value.coerceIn(0f, 1f)
       repaint()
     }
+  override var propOpacity: Float = 1f
+    set(value) {
+      field = value.coerceIn(0f, 1f)
+      repaint()
+    }
 
   var yaw = 45.0
   var pitch = 30.0
@@ -192,6 +201,10 @@ class NdsSoftwareMapView(
           override fun mouseReleased(e: MouseEvent) {
             cursor = Cursor.getDefaultCursor()
           }
+
+          override fun mouseExited(e: MouseEvent) {
+            setHoverCell(null)
+          }
         })
     addMouseMotionListener(
         object : MouseAdapter() {
@@ -219,25 +232,33 @@ class NdsSoftwareMapView(
               val hit =
                   if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
                   else pointerHit(e.x, e.y, includeModelGroup = false)
-              if (hit == null) return
-              if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
+              if (hit != null &&
+                  !onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
+            updateHoverCell(e.x, e.y)
           }
 
           override fun mouseMoved(e: MouseEvent) {
-            val cell = pickCell(e.x, e.y)
-            if (cell != hoverCell) {
-              hoverCell = cell
-              repaint()
-            }
+            updateHoverCell(e.x, e.y)
           }
         })
     addMouseWheelListener { e: MouseWheelEvent ->
       distance = (distance * (if (e.wheelRotation < 0) 0.9 else 1.1)).coerceIn(8.0, 220.0)
       repaint()
     }
+  }
+
+  private fun updateHoverCell(screenX: Int, screenY: Int) {
+    setHoverCell(pickCell(screenX, screenY))
+  }
+
+  private fun setHoverCell(cell: Pair<Int, Int>?) {
+    if (cell == hoverCell) return
+    hoverCell = cell
+    onHoverCell(cell)
+    repaint()
   }
 
   private fun paint(x: Int, z: Int, erase: Boolean) {
@@ -430,7 +451,8 @@ class NdsSoftwareMapView(
     }
     val faces = ArrayList<Face>()
     val color = Color(255, 230, 46, if (paintMode == PaintMode.ELEVATION) 200 else 90)
-    for ((cx, cz) in ndsBrushFootprint(hx, hz, brushSize, grid.cols, grid.rows)) {
+    for ((cx, cz) in ndsTileStampFootprint(
+        hx, hz, brushSize, activeTileWidth, activeTileHeight, grid.cols, grid.rows)) {
       val terrain = surface?.get(cx)?.get(cz)?.takeIf { !it.isNaN() } ?: 0.0
       val top = ndsPaintCursorHeight(
           grid, cx, cz, activeLayer, terrain, m?.scale ?: 1f, customTileGeometry) + 0.08
@@ -513,7 +535,9 @@ class NdsSoftwareMapView(
       if (a == null || b == null || c == null) continue
       val depth = (a[2] + b[2] + c[2]) / 3.0
       val original = Color(tri.color, true)
-      val color = Color(original.red, original.green, original.blue, (original.alpha * modelOpacity).toInt())
+      val opacity = ndsTriangleOpacity(tri, modelOpacity, propOpacity)
+      val color = Color(original.red, original.green, original.blue,
+          (original.alpha * opacity).toInt())
       if (color.alpha == 0) continue
       out += Face(
           depth,
@@ -589,9 +613,12 @@ class NdsSoftwareMapView(
           val sv = sampleTextureCoord(v * tri.scaleT, th.toInt(), tri.repeatT, tri.flipT)
           val sourceColor = pixels[sv * tw.toInt() + su]
           val sourceAlpha = (sourceColor ushr 24) and 0xFF
-          val col = (sourceColor and 0x00FFFFFF) or ((sourceAlpha * modelOpacity).toInt() shl 24)
+          val opacity = ndsTriangleOpacity(tri, modelOpacity, propOpacity)
+          val col = (sourceColor and 0x00FFFFFF) or ((sourceAlpha * opacity).toInt() shl 24)
           if ((col ushr 24) and 0xFF == 0) continue
-          depthBuf[idx] = depth
+          // Match the GL view: translucent geometry does not hide a painted tile rendered after
+          // it. This is what lets Show only tiles reveal/edit the square beneath a placed prop.
+          if (opacity >= 0.999f) depthBuf[idx] = depth
           img.setRGB(px, py, modulate(col, tri.color))
         }
       }

@@ -15,6 +15,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsEditHistory
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import de.lananahwp.openmmo.mapeditor.model.NdsGridStep
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
+import de.lananahwp.openmmo.mapeditor.model.NdsMapCropper
 import de.lananahwp.openmmo.mapeditor.model.NdsProp
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneSnapshot
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneStep
@@ -200,6 +201,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       )
   private val zoomLabel = JLabel("100%")
   private val status = JLabel("Open a decomp (File -> Open Decomp)")
+  private val ndsCursorCoordinates = JLabel("Cursor: X —, Z —")
 
   private val metatileContainer = JPanel(BorderLayout())
   private val headerContainer = JPanel(BorderLayout())
@@ -246,6 +248,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsCollisionCheck = JCheckBox("Collisions")
   private val ndsClearCollisionWithTerrain = JCheckBox("Clear collision with object", true)
   private val ndsCollisionEditView = JCheckBox("Transparent collision view")
+  private val ndsShowOnlyTiles = JCheckBox("Show only tiles")
   private val ndsRestoreTerrainButton = JButton("Restore last object")
 
   // Surface picking ("Pick Surface -> Prop"). Kept entirely separate from the terrain-object
@@ -398,7 +401,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     mainSplit.resizeWeight = 0.0
     mainSplit.dividerLocation = 280
     contentPane.add(mainSplit, BorderLayout.CENTER)
-    contentPane.add(status, BorderLayout.SOUTH)
+    contentPane.add(JPanel(BorderLayout(12, 0)).also {
+      it.border = BorderFactory.createEmptyBorder(2, 6, 2, 6)
+      it.add(ndsCursorCoordinates, BorderLayout.WEST)
+      it.add(status, BorderLayout.CENTER)
+    }, BorderLayout.SOUTH)
 
     tree.addTreeSelectionListener { e ->
       if (restoringSelection) return@addTreeSelectionListener
@@ -656,16 +663,29 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsCollisionEditView.addActionListener {
       val enabled = ndsCollisionEditView.isSelected
       if (enabled) {
+        ndsShowOnlyTiles.isSelected = false
         ndsCollisionCheck.isSelected = true
         ndsPaintMode.selectedIndex = 1
       }
-      view()?.let {
-        it.modelOpacity = if (enabled) 0.12f else 1f
-        if (enabled) it.showCollision = true
-        it.asComponent().repaint()
-      }
+      applyNdsVisibilityMode()
       status.text = if (enabled) {
         "Transparent collision view — choose Collision mode and paint the grid directly"
+      } else {
+        "Normal map view"
+      }
+    }
+    ndsShowOnlyTiles.toolTipText =
+        "Make placed props transparent so the painted tiles beneath them stay visible and editable"
+    ndsShowOnlyTiles.addActionListener {
+      val enabled = ndsShowOnlyTiles.isSelected
+      if (enabled) {
+        ndsCollisionEditView.isSelected = false
+        ndsCollisionCheck.isSelected = false
+        ndsPaintMode.selectedIndex = 0
+      }
+      applyNdsVisibilityMode()
+      status.text = if (enabled) {
+        "Tile-only view — placed props are transparent; paint tiles normally"
       } else {
         "Normal map view"
       }
@@ -709,8 +729,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     ndsSurfaceSaveButton.addActionListener { saveNdsSurfaceSelectionAsProp() }
     ndsSurfaceAddTileButton.toolTipText =
-        "Add the picked square to the Tile list so it can be painted like any other tile " +
-            "(select exactly one square)"
+        "Add the picked rectangular area to the Tile list as a reusable multi-square stamp"
     ndsSurfaceAddTileButton.addActionListener { addNdsSurfaceSelectionAsTile() }
     ndsSurfaceClearButton.addActionListener {
       clearNdsSurfaceSelection()
@@ -735,6 +754,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     toolbar.add(ndsCollisionCheck)
     val terrainToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     terrainToolbar.add(ndsCollisionEditView)
+    terrainToolbar.add(ndsShowOnlyTiles)
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsSnapToGridCheck)
     terrainToolbar.add(ndsRestoreTerrainButton)
@@ -772,6 +792,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
             { x, z -> eraseNdsCell(x, z) },
             { ndsHistory.beginStroke(ndsStrokeLabel()) },
+            { cell -> updateNdsCursorCoordinates(cell) },
         )
     val created =
         try {
@@ -781,6 +802,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
               { x, z -> eraseNdsCell(x, z) },
               { ndsHistory.beginStroke(ndsStrokeLabel()) },
+              { cell -> updateNdsCursorCoordinates(cell) },
           )
         } catch (t: Throwable) {
           System.out.println("[Nds] OpenGL view unavailable (${t.message}); using software renderer")
@@ -798,7 +820,26 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     created.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
     created.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     created.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
+    created.propOpacity = if (ndsShowOnlyTiles.isSelected) 0.35f else 1f
     return created
+  }
+
+  private fun applyNdsVisibilityMode() {
+    view()?.let {
+      it.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
+      it.propOpacity = if (ndsShowOnlyTiles.isSelected) 0.35f else 1f
+      it.showCollision = ndsCollisionCheck.isSelected
+      it.asComponent().repaint()
+    }
+  }
+
+  private fun updateNdsCursorCoordinates(cell: Pair<Int, Int>?) {
+    ndsCursorCoordinates.text = if (cell == null) {
+      "Cursor: X —, Z —"
+    } else {
+      val (x, z) = cell
+      "Cursor: X $x, Z $z  |  Matrix cell: X ${x / NdsGrid.COLS}, Z ${z / NdsGrid.ROWS}"
+    }
   }
 
   private fun buildMenuBar(): JMenuBar {
@@ -830,6 +871,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     rebuildRecent()
     file.add(recentMenu)
     file.add(JMenuItem("New Map…").apply { addActionListener { newMap() } })
+    file.add(
+        JMenuItem("Crop Custom Map by Coordinates…").apply {
+          addActionListener { cropNdsCustomMap() }
+        })
     file.add(JMenuItem("Import DS Map Model…").apply { addActionListener { importNdsModel() } })
     file.add(
         JMenuItem("Duplicate as Runtime Override…").apply {
@@ -1070,6 +1115,154 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     } catch (t: Throwable) {
       JOptionPane.showMessageDialog(
           this, t.message ?: t.toString(), "New DS Map failed", JOptionPane.ERROR_MESSAGE)
+    }
+  }
+
+  /** Crops an editor-created DS map by inclusive local tile coordinates. */
+  private fun cropNdsCustomMap() {
+    val map = currentNdsMap
+    val holder = currentNdsHolder
+    val ref = currentNdsRef
+    if (map == null || holder == null || ref == null) {
+      JOptionPane.showMessageDialog(
+          this, "Open a custom DS map first.", "Crop Custom Map", JOptionPane.WARNING_MESSAGE)
+      return
+    }
+    if (!map.isCustom) {
+      JOptionPane.showMessageDialog(
+          this, "ROM maps cannot be resized. Duplicate or create a custom map first.",
+          "Crop Custom Map", JOptionPane.WARNING_MESSAGE)
+      return
+    }
+    if (holder.project.hasImportedModel(map)) {
+      JOptionPane.showMessageDialog(
+          this,
+          "This map has an imported DS terrain model. Cropping would refit and distort that " +
+              "model, so imported-terrain maps cannot be cropped yet.",
+          "Crop Custom Map", JOptionPane.WARNING_MESSAGE)
+      return
+    }
+    val oldWidth = map.grid.cols
+    val oldHeight = map.grid.rows
+    // Plain fields are intentional: constrained JSpinners rewrite an in-progress typed value when
+    // another field changes its bounds, making coordinates appear to jump back to their defaults.
+    val startX = JTextField("0", 6)
+    val startZ = JTextField("0", 6)
+    val endX = JTextField((oldWidth - 1).toString(), 6)
+    val endZ = JTextField((oldHeight - 1).toString(), 6)
+    val tileSummary = JLabel()
+
+    fun updateBounds() {
+      val x = startX.text.trim().toIntOrNull()
+      val z = startZ.text.trim().toIntOrNull()
+      val lastX = endX.text.trim().toIntOrNull()
+      val lastZ = endZ.text.trim().toIntOrNull()
+      if (x == null || z == null || lastX == null || lastZ == null || lastX < x || lastZ < z) {
+        tileSummary.text = "Enter whole-number tile coordinates; each end must follow its start"
+        return
+      }
+      val w = lastX - x + 1
+      val h = lastZ - z + 1
+      val paddedW = ((w + NdsGrid.COLS - 1) / NdsGrid.COLS) * NdsGrid.COLS
+      val paddedH = ((h + NdsGrid.ROWS - 1) / NdsGrid.ROWS) * NdsGrid.ROWS
+      tileSummary.text =
+          "Keeps tiles X $x-$lastX, Z $z-$lastZ; " +
+              "selection ${w}x${h}, game map ${paddedW}x${paddedH} tiles"
+    }
+    installSearch(startX) { updateBounds() }
+    installSearch(startZ) { updateBounds() }
+    installSearch(endX) { updateBounds() }
+    installSearch(endZ) { updateBounds() }
+    updateBounds()
+
+    val fields = JPanel(GridLayout(0, 2, 8, 6)).also {
+      it.add(JLabel("Current size"))
+      it.add(JLabel("${oldWidth}x${oldHeight} tiles (X 0-${oldWidth - 1}, Z 0-${oldHeight - 1})"))
+      it.add(JLabel("Start X"))
+      it.add(startX)
+      it.add(JLabel("Start Z"))
+      it.add(startZ)
+      it.add(JLabel("End X (inclusive)"))
+      it.add(endX)
+      it.add(JLabel("End Z (inclusive)"))
+      it.add(endZ)
+    }
+    val panel = JPanel(BorderLayout(8, 8)).also {
+      it.add(JLabel("Coordinates are local map tiles and include both endpoints."), BorderLayout.NORTH)
+      it.add(fields, BorderLayout.CENTER)
+      it.add(tileSummary, BorderLayout.SOUTH)
+    }
+    var chosen: IntArray? = null
+    while (chosen == null) {
+      if (JOptionPane.showConfirmDialog(
+              this, panel, "Crop Custom Map by Coordinates",
+              JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return
+      val values = listOf(startX, startZ, endX, endZ).map { it.text.trim().toIntOrNull() }
+      if (values.any { it == null }) {
+        JOptionPane.showMessageDialog(
+            this, "All coordinates must be whole numbers.", "Invalid crop coordinates",
+            JOptionPane.ERROR_MESSAGE)
+        continue
+      }
+      val entered = values.map { requireNotNull(it) }
+      val candidate = intArrayOf(
+          entered[0], entered[1], entered[2] - entered[0] + 1, entered[3] - entered[1] + 1)
+      try {
+        NdsMapCropper.impact(map, candidate[0], candidate[1], candidate[2], candidate[3])
+        chosen = candidate
+      } catch (t: Throwable) {
+        JOptionPane.showMessageDialog(
+            this, t.message ?: t.toString(), "Invalid crop coordinates", JOptionPane.ERROR_MESSAGE)
+      }
+    }
+
+    val (x, z, w, h) = requireNotNull(chosen)
+    if (x == 0 && z == 0 && w == oldWidth && h == oldHeight) {
+      status.text = "Crop cancelled: those coordinates keep the entire map"
+      return
+    }
+
+    val impact = NdsMapCropper.impact(map, x, z, w, h)
+    val consequences = buildList {
+      if (impact.propsRemoved > 0) add("${impact.propsRemoved} prop(s)")
+      if (impact.objectsRemoved > 0) add("${impact.objectsRemoved} NPC/object event(s)")
+      if (impact.warpsRemoved > 0) add("${impact.warpsRemoved} warp(s)")
+      if (impact.triggersRemoved > 0) add("${impact.triggersRemoved} trigger(s)")
+      if (impact.bgEventsRemoved > 0) add("${impact.bgEventsRemoved} background event(s)")
+    }
+    val warning = buildString {
+      append("Crop ${map.displayName} to the selected ${w}x${h} tiles?\n\n")
+      append("Everything retained will be shifted so tile ($x, $z) becomes (0, 0).")
+      if (impact.outputWidth != w || impact.outputHeight != h) {
+        append("\nThe resulting map will be padded with empty tiles to " +
+            "${impact.outputWidth}x${impact.outputHeight}, a valid 32x32-cell footprint.")
+      }
+      if (consequences.isNotEmpty()) {
+        append("\nThe crop will permanently remove: ")
+        append(consequences.joinToString(", "))
+        append('.')
+      }
+      if (impact.triggersClipped > 0) {
+        append("\n${impact.triggersClipped} partially overlapping trigger(s) will be clipped.")
+      }
+      append("\n\nThis operation is saved immediately and cannot be undone.")
+    }
+    if (JOptionPane.showConfirmDialog(
+            this, warning, "Confirm Map Crop", JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) return
+
+    try {
+      NdsMapCropper.crop(map, x, z, w, h)
+      holder.project.save(map)
+      discardNdsNumericTransform()
+      ndsHistory.clear()
+      clearNdsSurfaceSelection()
+      openNdsMap(ref)
+      status.text =
+          "Cropped ${map.displayName} to ${map.grid.cols}x${map.grid.rows} tiles"
+    } catch (t: Throwable) {
+      JOptionPane.showMessageDialog(
+          this, t.message ?: t.toString(), "Crop failed", JOptionPane.ERROR_MESSAGE)
     }
   }
 
@@ -2675,7 +2868,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     } else {
       "Selected ${ndsSurfaceCells.size} square(s), $triangles triangle(s)" +
           (if (filter != null && ndsSurfaceSameTexture.isSelected) " of texture '$filter'" else "") +
-          " — Save selection as prop... to keep it"
+          " — add it as a tile or save it as a prop"
     }
   }
 
@@ -2734,7 +2927,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     if (!surfaceMode && ndsSurfaceCells.isNotEmpty()) clearNdsSurfaceSelection()
     if (surfaceMode) {
       status.text =
-          "Pick Surface: click the map squares you want, then Save selection as prop... " +
+          "Pick Surface: click the map squares you want, then add them as a tile or prop " +
               "(drag paints, Shift+drag boxes, Ctrl removes)"
     } else if (ndsPaintMode.selectedIndex == 0) {
       status.text =
@@ -2766,10 +2959,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       NdsTileChoice(index, tile.name, null)
     }
     val custom = projects.flatMap { project ->
+      val familyTag = if (project.family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.PLATINUM)
+        "Pt" else project.family.displayName
       project.customTileStore.tiles().map { tile ->
+        val footprint = if (tile.width == 1 && tile.height == 1) "" else " (${tile.width}x${tile.height})"
         NdsTileChoice(
             tile.index,
-            "[${project.family.displayName}] ${tile.name}",
+            "[$familyTag] ${tile.name}$footprint",
             project,
         )
       }
@@ -2789,7 +2985,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       ndsTileCombo.selectedIndex = wanted
       val selected = ndsTileChoices.getOrNull(wanted)
       if (selected?.project == null || selected.project === active) {
-        ndsView?.activeTile = selected?.index ?: 0
+        setNdsActiveTile(selected?.index ?: 0)
       }
     } finally {
       refreshingNdsTileCombo = false
@@ -2802,7 +2998,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val choice = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex) ?: return
     val active = currentNdsHolder?.project
     if (choice.project == null || active == null || choice.project === active) {
-      view()?.activeTile = choice.index
+      setNdsActiveTile(choice.index)
       return
     }
     val sourceProject = requireNotNull(choice.project)
@@ -2811,7 +3007,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val sourceKey = "${sourceProject.family.name}:${sourceTile.index}"
     val existing = active.customTileStore.tiles().firstOrNull { it.source == sourceKey }
     val local = existing ?: sourceProject.customTileStore.mesh(sourceTile.index)?.let { snapshot ->
-      active.customTileStore.add(sourceTile.name, snapshot, sourceKey)
+      active.customTileStore.add(
+          sourceTile.name, snapshot, sourceKey, sourceTile.width, sourceTile.height)
     }
     if (local == null) {
       status.text = "Could not load '${sourceTile.name}' from ${sourceProject.family.displayName}"
@@ -2822,12 +3019,21 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       refreshNdsCustomTiles(active.texturesFor(map), active.palettesFor(map))
     }
     refreshNdsTileCombo(local.index)
-    view()?.activeTile = local.index
+    setNdsActiveTile(local.index)
     status.text = if (existing == null) {
       "Copied '${sourceTile.name}' into ${active.family.displayName} tiles"
     } else {
       "Selected '${sourceTile.name}' from the local ${active.family.displayName} copy"
     }
+  }
+
+  private fun setNdsActiveTile(index: Int) {
+    val v = ndsView ?: return
+    val tile = currentNdsHolder?.project?.customTileStore?.tiles()?.firstOrNull { it.index == index }
+    v.activeTile = index
+    v.activeTileWidth = tile?.width ?: 1
+    v.activeTileHeight = tile?.height ?: 1
+    v.asComponent().repaint()
   }
 
   /**
@@ -2854,15 +3060,32 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.customTileGeometry = store.viewGeometry()
   }
 
-  /** Adds the single picked square to the project's tile set so it can be painted. */
+  /** Adds a rectangular set of picked squares as one anchored paintable tile stamp. */
   private fun addNdsSurfaceSelectionAsTile() {
     val map = currentNdsMap
     val holder = currentNdsHolder
-    if (map == null || holder == null || ndsSurfaceCells.size != 1) {
+    if (map == null || holder == null || ndsSurfaceCells.isEmpty()) {
       JOptionPane.showMessageDialog(
           this,
-          "Pick exactly one square to add as a tile. " +
-              "There ${if (ndsSurfaceCells.size > 1) "are ${ndsSurfaceCells.size} squares" else "is none"} selected.",
+          "Pick one or more map squares first.",
+          "Add as Tile",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+    val selectedX = ndsSurfaceCells.map(NdsProject::surfaceCellX)
+    val selectedZ = ndsSurfaceCells.map(NdsProject::surfaceCellZ)
+    val minX = selectedX.min()
+    val maxX = selectedX.max()
+    val minZ = selectedZ.min()
+    val maxZ = selectedZ.max()
+    val tileWidth = maxX - minX + 1
+    val tileHeight = maxZ - minZ + 1
+    if (ndsSurfaceCells.size != tileWidth * tileHeight) {
+      JOptionPane.showMessageDialog(
+          this,
+          "A multi-square tile must be a complete rectangle without gaps. " +
+              "The current selection has ${ndsSurfaceCells.size} of ${tileWidth * tileHeight} squares.",
           "Add as Tile",
           JOptionPane.WARNING_MESSAGE,
       )
@@ -2877,8 +3100,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     if (snapshot == null) {
       JOptionPane.showMessageDialog(
           this,
-          "That square has no geometry on it. Try turning off \"Same texture only\", or pick a " +
-              "square with visible terrain.",
+          "That selection has no geometry on it. Try turning off \"Same texture only\", or pick " +
+              "squares with visible terrain.",
           "Add as Tile",
           JOptionPane.WARNING_MESSAGE,
       )
@@ -2889,12 +3112,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         "${map.displayName} tile")?.toString()?.trim()
     if (name.isNullOrEmpty()) return
     try {
-      val tile = holder.project.customTileStore.add(name, snapshot)
+      val tile = holder.project.customTileStore.add(
+          name, snapshot, width = tileWidth, height = tileHeight)
       refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
       refreshNdsTileCombo(tile.index)
       ndsPaintMode.selectedIndex = 0
       status.text =
-          "Added tile '${tile.name}' — selected in the Tile list and available in this project"
+          "Added ${tile.width}x${tile.height} tile '${tile.name}' — selected and ready to paint"
     } catch (t: Throwable) {
       JOptionPane.showMessageDialog(
           this, t.message ?: t.toString(), "Add as Tile failed", JOptionPane.ERROR_MESSAGE)
@@ -3436,6 +3660,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val view = view() ?: return
     val layer = view.activeLayer
     val height = ndsPaintMode.selectedIndex == 3
+    val stamp = if (height) null else currentNdsHolder?.project?.customTileStore?.tiles()
+        ?.firstOrNull { it.index == view.activeTile }
+    var painted = 0
     for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
       if (height) {
         ndsHistory.recordCell(NdsCellEdit(
@@ -3443,11 +3670,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             map.grid.heightAt(layer, cx, cz), view.activeHeight.coerceIn(-32, 32)))
         map.grid.setHeight(layer, cx, cz, view.activeHeight)
       } else {
+        if (stamp != null &&
+            (cx + stamp.width > map.grid.cols || cz + stamp.height > map.grid.rows)) continue
         ndsHistory.recordCell(NdsCellEdit(
             NdsCellKind.TILE, layer, cx, cz,
             map.grid.tileAt(layer, cx, cz), view.activeTile))
         map.grid.setTile(layer, cx, cz, view.activeTile)
       }
+      painted++
+    }
+    if (!height && painted == 0 && stamp != null) {
+      status.text = "${stamp.width}x${stamp.height} tile does not fit at that map edge"
+      return
     }
     markDirty()
     view.asComponent().repaint()

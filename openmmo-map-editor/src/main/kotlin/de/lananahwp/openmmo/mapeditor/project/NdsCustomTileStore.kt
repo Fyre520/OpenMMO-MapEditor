@@ -19,8 +19,14 @@ import java.io.File
  * Each open project owns its own store and caches.
  */
 class NdsCustomTileStore(rootDir: File) {
-  /** A tile in the project set. [index] is what a grid persists, so it must never change. */
-  data class TileInfo(val index: Int, val name: String, val source: String? = null)
+  /** A tile/stamp in the project set. [index] is what a grid persists, so it must never change. */
+  data class TileInfo(
+      val index: Int,
+      val name: String,
+      val source: String? = null,
+      val width: Int = 1,
+      val height: Int = 1,
+  )
 
   private var cache: List<TileInfo>? = null
   private val meshCache = HashMap<Int, NdsMeshSnapshot?>()
@@ -53,7 +59,13 @@ class NdsCustomTileStore(rootDir: File) {
       JsonParser.parse(file.readText()).asObj()?.arr("tiles")?.items.orEmpty().mapNotNull { item ->
         val o = item.asObj() ?: return@mapNotNull null
         val index = o.int("index") ?: return@mapNotNull null
-        TileInfo(index, o.str("name") ?: "Tile $index", o.str("source"))
+        TileInfo(
+            index,
+            o.str("name") ?: "Tile $index",
+            o.str("source"),
+            o.int("width")?.coerceAtLeast(1) ?: 1,
+            o.int("height")?.coerceAtLeast(1) ?: 1,
+        )
       }
     } catch (_: Throwable) {
       emptyList()
@@ -63,8 +75,15 @@ class NdsCustomTileStore(rootDir: File) {
   }
 
   /** Stores a picked surface as a new paintable tile. */
-  fun add(name: String, snapshot: NdsMeshSnapshot, source: String? = null): TileInfo {
+  fun add(
+      name: String,
+      snapshot: NdsMeshSnapshot,
+      source: String? = null,
+      width: Int = 1,
+      height: Int = 1,
+  ): TileInfo {
     require(snapshot.triangles.isNotEmpty()) { "That selection has no geometry to add as a tile" }
+    require(width >= 1 && height >= 1) { "Tile footprint must be at least 1x1" }
     val existing = tiles()
     // Never reuse a number, even one whose tile was deleted by hand: saved grids may still name it.
     val index = existing.maxOfOrNull { it.index }?.plus(1) ?: NdsTileset.CUSTOM_TILE_BASE
@@ -73,13 +92,15 @@ class NdsCustomTileStore(rootDir: File) {
     tileDir(index).mkdirs()
     NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
 
-    val updated = existing + TileInfo(index, label, source)
+    val updated = existing + TileInfo(index, label, source, width, height)
     val json = Json.JObj(linkedMapOf(
-        "version" to Json.JNum(2.0),
+        "version" to Json.JNum(3.0),
         "tiles" to Json.JArr(updated.map { t ->
           Json.JObj(linkedMapOf(
               "index" to Json.JNum(t.index.toDouble()),
               "name" to Json.JStr(t.name),
+              "width" to Json.JNum(t.width.toDouble()),
+              "height" to Json.JNum(t.height.toDouble()),
           ).also { entries -> t.source?.let { entries["source"] = Json.JStr(it) } })
         }),
     ))
@@ -87,7 +108,7 @@ class NdsCustomTileStore(rootDir: File) {
     indexFile().writeText(JsonWriter.writePretty(json) + "\n")
     cache = updated
     meshCache.remove(index)
-    return TileInfo(index, label, source)
+    return TileInfo(index, label, source, width, height)
   }
 
   /** The geometry for a tile, in unit-square tile space. */
