@@ -73,17 +73,14 @@ private fun testCustomTiles() {
       linkedMapOf("grass_pl" to intArrayOf(1, 2)),
   )
 
-  val store = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore
-  val previousRoot = store.rootDir
   val root = Files.createTempDirectory("openmmo-custom-tiles-").toFile()
+  val store = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore(root)
   try {
-    // Never touch the real user directory from a test.
-    store.rootDir = root
     check(store.tiles().isEmpty()) { "a fresh store should have no tiles" }
 
     val first = store.add("Olivine path", snapshot)
     check(first.index == base) { "first tile should take the base index, got ${first.index}" }
-    val second = store.add("Park grass", snapshot)
+    val second = store.add("Park grass", snapshot, "PLATINUM:$base")
     check(second.index == base + 1) { "indices must advance, got ${second.index}" }
 
     // Reloading from disk must preserve both the order and the numbers.
@@ -91,6 +88,7 @@ private fun testCustomTiles() {
     val listed = store.tiles()
     check(listed.map { it.index } == listOf(base, base + 1)) { "tile indices changed on reload" }
     check(listed.map { it.name } == listOf("Olivine path", "Park grass")) { "tile order changed" }
+    check(listed[1].source == "PLATINUM:$base") { "import source was not preserved" }
 
     // The store rests a tile on y=0 and otherwise stores exactly what it was handed. It must
     // never rescale: the fixture is two tiles across, and it has to stay two tiles across.
@@ -118,7 +116,7 @@ private fun testCustomTiles() {
     check(third.index == base + 2) { "index was reused after reload: ${third.index}" }
 
     // Textures are namespaced per tile so two tiles cut from different maps cannot collide on a
-    // shared texture name -- the shared store makes that reachable in a way per-project never was.
+    // shared texture name inside one project library.
     val geometry = store.viewGeometry()
     check(geometry.keys.containsAll(setOf(base, base + 1, base + 2)))
     check(geometry.getValue(base).all { it.texture.startsWith(store.texturePrefix(base)) }) {
@@ -128,7 +126,6 @@ private fun testCustomTiles() {
       "two tiles shared a texture namespace"
     }
   } finally {
-    store.rootDir = previousRoot
     root.deleteRecursively()
   }
 }

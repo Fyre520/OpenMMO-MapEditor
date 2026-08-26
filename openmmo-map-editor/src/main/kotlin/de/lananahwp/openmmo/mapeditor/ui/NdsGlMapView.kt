@@ -38,15 +38,16 @@ class NdsGlMapView(
     private val onStrokeBegin: () -> Unit = {},
 ) : GLCanvas(GLCapabilities(GLProfile.get(GLProfile.GL2))), GLEventListener, Nds3DView {
 
-  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
+  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
 
   override fun setPaintMode(mode: Int) {
     paintMode =
         when (mode) {
+          0 -> PaintMode.TILE
           1 -> PaintMode.COLLISION
           2 -> PaintMode.PERMISSION
           3 -> PaintMode.ELEVATION
-          else -> PaintMode.TILE
+          else -> PaintMode.NONE
         }
   }
 
@@ -70,6 +71,11 @@ class NdsGlMapView(
   override var activeLayer = 0
   override var activeTile = 0
   override var activeHeight = 0
+  override var brushSize = 1
+    set(value) {
+      field = value.coerceAtLeast(1)
+      repaint()
+    }
   override var brushCollision = 1
   override var showGrid = true
   override var showCollision = false
@@ -219,6 +225,7 @@ class NdsGlMapView(
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
       PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.NONE -> Unit
     }
   }
 
@@ -252,6 +259,7 @@ class NdsGlMapView(
     drawGround(gl)
     drawModel(gl)
     drawPlacedTiles(gl)
+    drawBrushCursor(gl)
     drawHighlight(gl)
     drawMarkers(gl)
     gl.glFlush()
@@ -316,15 +324,6 @@ class NdsGlMapView(
       }
       gl.glEnd()
     }
-    hoverCell?.let { (hx, hz) ->
-      gl.glColor4f(1f, 1f, 0.4f, 0.35f)
-      gl.glBegin(GL2.GL_QUADS)
-      groundVertex(gl, hx.toDouble(), 0.01, hz.toDouble(), xf)
-      groundVertex(gl, (hx + 1).toDouble(), 0.01, hz.toDouble(), xf)
-      groundVertex(gl, (hx + 1).toDouble(), 0.01, (hz + 1).toDouble(), xf)
-      groundVertex(gl, hx.toDouble(), 0.01, (hz + 1).toDouble(), xf)
-      gl.glEnd()
-    }
     gl.glDisable(GL2.GL_BLEND)
     gl.glDepthMask(true)
     gl.glEnable(GL2.GL_LIGHTING)
@@ -350,6 +349,42 @@ class NdsGlMapView(
     val out = ndsTileSurfaceHeights(surfaceTriangles, g.cols, g.rows, xf.groundY, xf.scale)
     tileSurfaceCache = out
     return out
+  }
+
+  /** Draws the paint footprint over the terrain/painted tile it will actually modify. */
+  private fun drawBrushCursor(gl: GL2) {
+    if (paintMode == PaintMode.NONE) return
+    val g = grid ?: return
+    val (hx, hz) = hoverCell ?: return
+    val xf = modelXformCache
+    val surface = xf?.let { tileSurfaceHeights(g, it) }
+    val modelScale = xf?.scale ?: 1f
+    gl.glDisable(GL2.GL_LIGHTING)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glEnable(GL2.GL_BLEND)
+    gl.glBlendFunc(GL2.GL_SRC_ALPHA, GL2.GL_ONE_MINUS_SRC_ALPHA)
+    // This is an editor overlay, not scene geometry. Even a lifted coplanar quad eventually
+    // z-fights as zoom changes because depth-buffer precision is non-linear. Drawing after the
+    // scene with depth testing disabled keeps the footprint stable at every camera distance.
+    gl.glDisable(GL2.GL_DEPTH_TEST)
+    gl.glDepthMask(false)
+    val hoverAlpha = if (paintMode == PaintMode.ELEVATION) 0.78f else 0.35f
+    gl.glColor4f(1f, 0.9f, 0.18f, hoverAlpha)
+    gl.glBegin(GL2.GL_QUADS)
+    for ((cx, cz) in ndsBrushFootprint(hx, hz, brushSize, g.cols, g.rows)) {
+      val terrain = surface?.get(cx)?.get(cz)?.takeIf { !it.isNaN() } ?: 0.0
+      val top = ndsPaintCursorHeight(
+          g, cx, cz, activeLayer, terrain, modelScale, customTileGeometry) + 0.08
+      groundVertex(gl, cx.toDouble(), top, cz.toDouble(), xf)
+      groundVertex(gl, (cx + 1).toDouble(), top, cz.toDouble(), xf)
+      groundVertex(gl, (cx + 1).toDouble(), top, (cz + 1).toDouble(), xf)
+      groundVertex(gl, cx.toDouble(), top, (cz + 1).toDouble(), xf)
+    }
+    gl.glEnd()
+    gl.glDepthMask(true)
+    gl.glEnable(GL2.GL_DEPTH_TEST)
+    gl.glDisable(GL2.GL_BLEND)
+    gl.glEnable(GL2.GL_LIGHTING)
   }
 
   /**

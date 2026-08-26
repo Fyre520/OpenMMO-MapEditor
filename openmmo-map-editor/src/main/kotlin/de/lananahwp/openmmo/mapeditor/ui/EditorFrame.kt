@@ -219,6 +219,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsHeaderPanel = NdsHeaderPanel { onNdsHeaderApplied() }
   private val ndsEventsPanel = NdsEventsPanel { onNdsEventsChanged() }
   private val ndsTileCombo = JComboBox<String>()
+  private val ndsActiveRomTilesOnly = JCheckBox("Load tiles from active ROM only", false)
   private val ndsLayerSpinner = JSpinner(SpinnerNumberModel(0, 0, NdsGrid.LAYERS - 1, 1))
   private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0, -32, 32, 1))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
@@ -265,8 +266,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsSurfaceSaveButton = JButton("Save selection as prop...")
   private val ndsSurfaceAddTileButton = JButton("Add as tile")
 
-  /** Tile ids in the order the Tile combo lists them; built-ins first, then project tiles. */
-  private var ndsTileIds: List<Int> = NdsTileset.tiles.indices.toList()
+  /** One Tile-combo row. Null [project] means a built-in procedural tile. */
+  private data class NdsTileChoice(val index: Int, val label: String, val project: NdsProject?)
+  private var ndsTileChoices: List<NdsTileChoice> =
+      NdsTileset.tiles.mapIndexed { index, tile -> NdsTileChoice(index, tile.name, null) }
+  private var refreshingNdsTileCombo = false
   private val ndsSurfaceClearButton = JButton("Clear selection")
   private val ndsSurfaceCells = LinkedHashSet<Long>()
 
@@ -617,8 +621,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             NdsTileset.tiles.map { it.name }.toTypedArray())
     ndsTileCombo.selectedIndex = 0
     ndsTileCombo.addActionListener {
-      view()?.activeTile = ndsTileIds.getOrElse(ndsTileCombo.selectedIndex.coerceAtLeast(0)) { 0 }
+      selectNdsTileChoice()
     }
+    ndsActiveRomTilesOnly.toolTipText =
+        "Show only custom tiles stored with the currently open HeartGold or Platinum project"
+    ndsActiveRomTilesOnly.addActionListener { refreshNdsTileCombo() }
     ndsLayerSpinner.preferredSize = Dimension(60, ndsLayerSpinner.preferredSize.height)
     ndsLayerSpinner.addChangeListener {
       view()?.activeLayer = (ndsLayerSpinner.value as Number).toInt()
@@ -630,6 +637,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsTileBrushSpinner.preferredSize = Dimension(60, ndsTileBrushSpinner.preferredSize.height)
     ndsTileBrushSpinner.toolTipText =
         "How many squares across one click paints, centred on the square under the pointer"
+    ndsTileBrushSpinner.addChangeListener {
+      view()?.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
+    }
     ndsSnapToGridCheck.toolTipText =
         "Place and drag props on whole map squares; painted tiles are always square-aligned"
     ndsCollisionValueSpinner.preferredSize = Dimension(60, ndsCollisionValueSpinner.preferredSize.height)
@@ -710,6 +720,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     toolbar.add(JLabel("Tile:"))
     toolbar.add(ndsTileCombo)
+    toolbar.add(ndsActiveRomTilesOnly)
     toolbar.add(JLabel("Layer:"))
     toolbar.add(ndsLayerSpinner)
     toolbar.add(JLabel("Height:"))
@@ -784,6 +795,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     created.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
     created.showGrid = ndsGridCheck.isSelected
     created.showCollision = ndsCollisionCheck.isSelected
+    created.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
     created.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     created.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
     return created
@@ -2736,21 +2748,86 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   /**
-   * Rebuilds the Tile combo from the built-in set plus this project's own tiles.
+   * Rebuilds the Tile combo from the built-ins plus both open ROM projects by default.
    *
-   * The combo's position is not the tile id: project tiles are numbered from
-   * [NdsTileset.CUSTOM_TILE_BASE] so they can never collide with a built-in, so the two are kept
-   * in step through [ndsTileIds].
+   * A foreign tile is only a catalog choice here. [selectNdsTileChoice] copies it into the active
+   * project before painting because the map grid persists an id, not a source-project path.
    */
   private fun refreshNdsTileCombo(preferredId: Int? = null) {
-    val custom = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore.tiles()
-    val wanted = preferredId ?: ndsTileIds.getOrNull(ndsTileCombo.selectedIndex)
-    ndsTileIds = NdsTileset.tiles.indices.toList() + custom.map { it.index }
-    val names = NdsTileset.tiles.map { it.name } + custom.map { it.name }
-    ndsTileCombo.model = javax.swing.DefaultComboBoxModel(names.toTypedArray())
-    val position = wanted?.let { ndsTileIds.indexOf(it) }?.takeIf { it >= 0 } ?: 0
-    ndsTileCombo.selectedIndex = position
-    ndsView?.activeTile = ndsTileIds.getOrElse(position) { 0 }
+    val active = currentNdsHolder?.project
+    val previous = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex)
+    val projects = if (ndsActiveRomTilesOnly.isSelected) {
+      listOfNotNull(active)
+    } else {
+      ndsHolders.values.map { it.project }
+          .sortedBy { if (it === active) 0 else 1 }
+    }
+    val builtIns = NdsTileset.tiles.mapIndexed { index, tile ->
+      NdsTileChoice(index, tile.name, null)
+    }
+    val custom = projects.flatMap { project ->
+      project.customTileStore.tiles().map { tile ->
+        NdsTileChoice(
+            tile.index,
+            "[${project.family.displayName}] ${tile.name}",
+            project,
+        )
+      }
+    }
+    ndsTileChoices = builtIns + custom
+    refreshingNdsTileCombo = true
+    try {
+      ndsTileCombo.model = javax.swing.DefaultComboBoxModel(
+          ndsTileChoices.map { it.label }.toTypedArray())
+      val wanted = preferredId?.let { id ->
+        ndsTileChoices.indexOfFirst { it.index == id && it.project === active }
+      }?.takeIf { it >= 0 } ?: previous?.takeIf { old ->
+        old.project == null || old.project === active
+      }?.let { old ->
+        ndsTileChoices.indexOfFirst { it.index == old.index && it.project === old.project }
+      }?.takeIf { it >= 0 } ?: 0
+      ndsTileCombo.selectedIndex = wanted
+      val selected = ndsTileChoices.getOrNull(wanted)
+      if (selected?.project == null || selected.project === active) {
+        ndsView?.activeTile = selected?.index ?: 0
+      }
+    } finally {
+      refreshingNdsTileCombo = false
+    }
+  }
+
+  /** Resolves a catalog row to an id owned by the active project. */
+  private fun selectNdsTileChoice() {
+    if (refreshingNdsTileCombo) return
+    val choice = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex) ?: return
+    val active = currentNdsHolder?.project
+    if (choice.project == null || active == null || choice.project === active) {
+      view()?.activeTile = choice.index
+      return
+    }
+    val sourceProject = requireNotNull(choice.project)
+    val sourceTile = sourceProject.customTileStore.tiles().firstOrNull { it.index == choice.index }
+        ?: return
+    val sourceKey = "${sourceProject.family.name}:${sourceTile.index}"
+    val existing = active.customTileStore.tiles().firstOrNull { it.source == sourceKey }
+    val local = existing ?: sourceProject.customTileStore.mesh(sourceTile.index)?.let { snapshot ->
+      active.customTileStore.add(sourceTile.name, snapshot, sourceKey)
+    }
+    if (local == null) {
+      status.text = "Could not load '${sourceTile.name}' from ${sourceProject.family.displayName}"
+      return
+    }
+    val map = currentNdsMap
+    if (map != null) {
+      refreshNdsCustomTiles(active.texturesFor(map), active.palettesFor(map))
+    }
+    refreshNdsTileCombo(local.index)
+    view()?.activeTile = local.index
+    status.text = if (existing == null) {
+      "Copied '${sourceTile.name}' into ${active.family.displayName} tiles"
+    } else {
+      "Selected '${sourceTile.name}' from the local ${active.family.displayName} copy"
+    }
   }
 
   /**
@@ -2762,7 +2839,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
    */
   private fun refreshNdsCustomTiles(mapTextures: Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture>,
                                     mapPalettes: Map<String, IntArray>) {
-    val store = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore
+    val store = currentNdsHolder?.project?.customTileStore ?: return
     val v = ndsView ?: return
     val textures = LinkedHashMap(mapTextures)
     val palettes = LinkedHashMap(mapPalettes)
@@ -2812,12 +2889,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         "${map.displayName} tile")?.toString()?.trim()
     if (name.isNullOrEmpty()) return
     try {
-      val tile = de.lananahwp.openmmo.mapeditor.project.NdsCustomTileStore.add(name, snapshot)
+      val tile = holder.project.customTileStore.add(name, snapshot)
       refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
       refreshNdsTileCombo(tile.index)
       ndsPaintMode.selectedIndex = 0
       status.text =
-          "Added tile '${tile.name}' — selected in the Tile list and available on every map"
+          "Added tile '${tile.name}' — selected in the Tile list and available in this project"
     } catch (t: Throwable) {
       JOptionPane.showMessageDialog(
           this, t.message ?: t.toString(), "Add as Tile failed", JOptionPane.ERROR_MESSAGE)

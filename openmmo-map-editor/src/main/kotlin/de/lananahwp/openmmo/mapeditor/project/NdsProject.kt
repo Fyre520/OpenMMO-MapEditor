@@ -24,17 +24,44 @@ import java.awt.Color
 import kotlin.math.floor
 
 /** A Gen 4 DS map project backed by a decomp (and optionally a matching ROM). */
-class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
+class NdsProject(
+    val rootDir: File,
+    private val explicitRomFile: File? = null,
+    private val legacyCustomTileRoot: File? =
+        File(System.getProperty("user.home"), ".openmmo/tiles"),
+) {
+  private var customTileStoreBacking: NdsCustomTileStore? = null
   /**
    * Where this project keeps the editor's own files: custom maps, props, imported models and grid
    * overrides.
    *
-   * Overridable for the same reason [NdsCustomTileStore.rootDir] is: a test that persists
-   * anything must be able to point somewhere throwaway. Everything a user has built with the
-   * editor lives under here, so a test writing into a real decomp -- let alone cleaning up after
+   * Overridable so a test that persists anything can point somewhere throwaway. Everything a user
+   * has built with the editor lives under here, so a test writing into a real decomp -- let alone cleaning up after
    * itself by removing this directory -- destroys work that has nothing to do with it.
    */
   var overrideRoot: File = File(rootDir, ".openmmo")
+    set(value) {
+      field = value
+      customTileStoreBacking = null
+    }
+
+  /** Project-local paintable tiles, kept beside this project's maps and prop catalog. */
+  val customTileStore: NdsCustomTileStore
+    get() = customTileStoreBacking
+        ?: openCustomTileStore().also { customTileStoreBacking = it }
+
+  private fun openCustomTileStore(): NdsCustomTileStore {
+    val target = File(overrideRoot, "nds/tiles")
+    val legacy = legacyCustomTileRoot
+    if (!target.exists() && legacy != null && File(legacy, "tiles.json").isFile) {
+      runCatching { legacy.copyRecursively(target, overwrite = false) }
+          .onFailure { failure ->
+            System.err.println(
+                "[NdsProject] Could not migrate custom tiles from ${legacy.path}: ${failure.message}")
+          }
+    }
+    return NdsCustomTileStore(target)
+  }
 
   /** 1 DS map-model unit = 4 tiles (map cells are ~8 units per 32x32 tile cell). */
   private val TILE_SCALE = 4f
@@ -1689,7 +1716,7 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
    * looked right in the viewport exported buried inside the map.
    */
   fun customTileTrianglesFor(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
-    val geometry = NdsCustomTileStore.viewGeometry()
+    val geometry = customTileStore.viewGeometry()
     if (geometry.isEmpty()) return emptyList()
     val surface = tileSurfaceHeights(map)
     val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
@@ -1724,8 +1751,8 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     val used = usedCustomTiles(map)
     return buildMap {
       for (index in used) {
-        val prefix = NdsCustomTileStore.texturePrefix(index)
-        for ((name, texture) in NdsCustomTileStore.mesh(index)?.textures.orEmpty()) {
+        val prefix = customTileStore.texturePrefix(index)
+        for ((name, texture) in customTileStore.mesh(index)?.textures.orEmpty()) {
           put(prefix + name, texture)
         }
       }
@@ -1736,8 +1763,8 @@ class NdsProject(val rootDir: File, private val explicitRomFile: File? = null) {
     val used = usedCustomTiles(map)
     return buildMap {
       for (index in used) {
-        val prefix = NdsCustomTileStore.texturePrefix(index)
-        for ((name, palette) in NdsCustomTileStore.mesh(index)?.palettes.orEmpty()) {
+        val prefix = customTileStore.texturePrefix(index)
+        for ((name, palette) in customTileStore.mesh(index)?.palettes.orEmpty()) {
           put(prefix + name, palette)
         }
       }

@@ -43,15 +43,16 @@ class NdsSoftwareMapView(
     private val onStrokeBegin: () -> Unit = {},
 ) : JPanel(), Nds3DView {
 
-  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
+  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
 
   override fun setPaintMode(mode: Int) {
     paintMode =
         when (mode) {
+          0 -> PaintMode.TILE
           1 -> PaintMode.COLLISION
           2 -> PaintMode.PERMISSION
           3 -> PaintMode.ELEVATION
-          else -> PaintMode.TILE
+          else -> PaintMode.NONE
         }
   }
 
@@ -72,6 +73,11 @@ class NdsSoftwareMapView(
   override var activeLayer = 0
   override var activeTile = 0
   override var activeHeight = 0
+  override var brushSize = 1
+    set(value) {
+      field = value.coerceAtLeast(1)
+      repaint()
+    }
   override var brushCollision = 1
   override var showGrid = true
   override var showCollision = false
@@ -242,6 +248,7 @@ class NdsSoftwareMapView(
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
       PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.NONE -> Unit
     }
   }
 
@@ -370,10 +377,6 @@ class NdsSoftwareMapView(
         line(lines, cam, a[0], a[1], a[2], b[0], b[1], b[2], lineColor)
       }
     }
-    hoverCell?.let { (hx, hz) ->
-      val p = gx(hx.toDouble(), hz.toDouble())
-      quad(tiles, cam, p[0], p[1] + 0.02, p[2], Color(255, 255, 120, 90))
-    }
     for (layer in 0 until NdsGrid.LAYERS) {
       for (x in 0 until grid.cols) {
         for (z in 0 until grid.rows) {
@@ -413,8 +416,27 @@ class NdsSoftwareMapView(
     drawFaces(g2, tiles)
     drawFaces(g2, markerFaces)
     drawTexturedTriangles(g2)
+    drawBrushCursor(g2, cam, grid, mx)
     // After the textured pass, so the selection stays visible on top of the geometry it marks.
     drawHighlightTriangles(g2, cam)
+  }
+
+  /** Draws the paint footprint last so textured terrain cannot cover it. */
+  private fun drawBrushCursor(g2: Graphics2D, cam: Camera, grid: NdsGrid, m: ModelXform?) {
+    if (paintMode == PaintMode.NONE) return
+    val (hx, hz) = hoverCell ?: return
+    val surface = m?.let {
+      ndsTileSurfaceHeights(surfaceTriangles, grid.cols, grid.rows, it.groundY, it.scale)
+    }
+    val faces = ArrayList<Face>()
+    val color = Color(255, 230, 46, if (paintMode == PaintMode.ELEVATION) 200 else 90)
+    for ((cx, cz) in ndsBrushFootprint(hx, hz, brushSize, grid.cols, grid.rows)) {
+      val terrain = surface?.get(cx)?.get(cz)?.takeIf { !it.isNaN() } ?: 0.0
+      val top = ndsPaintCursorHeight(
+          grid, cx, cz, activeLayer, terrain, m?.scale ?: 1f, customTileGeometry) + 0.08
+      gridQuad(faces, cam, cx, cz, top, color, m)
+    }
+    drawFaces(g2, faces)
   }
 
   /** Draws the current selection as a tinted, outlined overlay over the geometry it was taken from. */
@@ -621,6 +643,34 @@ class NdsSoftwareMapView(
     if (a == null || b == null || c == null || d == null) return
     val depth = (a[2] + b[2] + c[2] + d[2]) / 4.0
     out += Face(depth, intArrayOf(a[0].toInt(), b[0].toInt(), c[0].toInt(), d[0].toInt()), intArrayOf(a[1].toInt(), b[1].toInt(), c[1].toInt(), d[1].toInt()), color)
+  }
+
+  private fun gridQuad(
+      out: MutableList<Face>,
+      cam: Camera,
+      x: Int,
+      z: Int,
+      y: Double,
+      color: Color,
+      m: ModelXform?,
+  ) {
+    fun point(px: Int, pz: Int): DoubleArray =
+        if (m == null) doubleArrayOf(px.toDouble(), y, pz.toDouble())
+        else doubleArrayOf(
+            16.0 + (px - m.cx) * m.scale,
+            y,
+            16.0 + (pz - m.cz) * m.scale,
+        )
+    val a = project(viewCoords(cam, point(x, z))) ?: return
+    val b = project(viewCoords(cam, point(x + 1, z))) ?: return
+    val c = project(viewCoords(cam, point(x + 1, z + 1))) ?: return
+    val d = project(viewCoords(cam, point(x, z + 1))) ?: return
+    out += Face(
+        (a[2] + b[2] + c[2] + d[2]) / 4.0,
+        intArrayOf(a[0].toInt(), b[0].toInt(), c[0].toInt(), d[0].toInt()),
+        intArrayOf(a[1].toInt(), b[1].toInt(), c[1].toInt(), d[1].toInt()),
+        color,
+    )
   }
 
   private fun cube(

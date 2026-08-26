@@ -9,27 +9,23 @@ import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 import java.io.File
 
 /**
- * Paintable tiles lifted off map surfaces, shared by every project the editor has open.
+ * Paintable tiles lifted off map surfaces and stored with one DS project.
  *
- * Deliberately not per-project, unlike the prop catalog. A tile is a baked snapshot carrying its
+ * A tile is a baked snapshot carrying its
  * own textures and palettes, so it depends on neither the ROM nor the decomp it was cut from —
- * a path taken from Platinum paints onto a HeartGold map perfectly well, and that cross-map reuse
- * is the entire point. Kept in the user's home directory rather than inside a decomp so that it
- * survives switching projects and never writes into a checkout.
+ * a path taken from Platinum still paints onto a HeartGold map perfectly well. Keeping the
+ * library under `.openmmo/nds/tiles` makes maps, props, and referenced tiles travel together.
  *
- * A single store rather than per-project state also keeps the caches from diverging: several
- * projects are open at once, and a tile added while one map is loaded has to be visible from the
- * next map regardless of which project that belongs to.
+ * Each open project owns its own store and caches.
  */
-object NdsCustomTileStore {
-  /** A tile in the shared set. [index] is what a grid persists, so it must never change. */
-  data class TileInfo(val index: Int, val name: String)
+class NdsCustomTileStore(rootDir: File) {
+  /** A tile in the project set. [index] is what a grid persists, so it must never change. */
+  data class TileInfo(val index: Int, val name: String, val source: String? = null)
 
   private var cache: List<TileInfo>? = null
   private val meshCache = HashMap<Int, NdsMeshSnapshot?>()
 
-  /** Overridable so tests do not touch the real user directory. */
-  var rootDir: File = File(System.getProperty("user.home"), ".openmmo/tiles")
+  var rootDir: File = rootDir
     set(value) {
       field = value
       invalidate()
@@ -57,7 +53,7 @@ object NdsCustomTileStore {
       JsonParser.parse(file.readText()).asObj()?.arr("tiles")?.items.orEmpty().mapNotNull { item ->
         val o = item.asObj() ?: return@mapNotNull null
         val index = o.int("index") ?: return@mapNotNull null
-        TileInfo(index, o.str("name") ?: "Tile $index")
+        TileInfo(index, o.str("name") ?: "Tile $index", o.str("source"))
       }
     } catch (_: Throwable) {
       emptyList()
@@ -67,7 +63,7 @@ object NdsCustomTileStore {
   }
 
   /** Stores a picked surface as a new paintable tile. */
-  fun add(name: String, snapshot: NdsMeshSnapshot): TileInfo {
+  fun add(name: String, snapshot: NdsMeshSnapshot, source: String? = null): TileInfo {
     require(snapshot.triangles.isNotEmpty()) { "That selection has no geometry to add as a tile" }
     val existing = tiles()
     // Never reuse a number, even one whose tile was deleted by hand: saved grids may still name it.
@@ -77,21 +73,21 @@ object NdsCustomTileStore {
     tileDir(index).mkdirs()
     NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
 
-    val updated = existing + TileInfo(index, label)
+    val updated = existing + TileInfo(index, label, source)
     val json = Json.JObj(linkedMapOf(
-        "version" to Json.JNum(1.0),
+        "version" to Json.JNum(2.0),
         "tiles" to Json.JArr(updated.map { t ->
           Json.JObj(linkedMapOf(
               "index" to Json.JNum(t.index.toDouble()),
               "name" to Json.JStr(t.name),
-          ))
+          ).also { entries -> t.source?.let { entries["source"] = Json.JStr(it) } })
         }),
     ))
     indexFile().parentFile?.mkdirs()
     indexFile().writeText(JsonWriter.writePretty(json) + "\n")
     cache = updated
     meshCache.remove(index)
-    return TileInfo(index, label)
+    return TileInfo(index, label, source)
   }
 
   /** The geometry for a tile, in unit-square tile space. */

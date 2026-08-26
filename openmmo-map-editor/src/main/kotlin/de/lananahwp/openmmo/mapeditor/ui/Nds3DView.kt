@@ -2,6 +2,8 @@ package de.lananahwp.openmmo.mapeditor.ui
 
 import de.lananahwp.openmmo.mapeditor.core.NdsTexture
 import de.lananahwp.openmmo.mapeditor.core.NdsTri
+import de.lananahwp.openmmo.mapeditor.core.NdsTileset
+import de.lananahwp.openmmo.mapeditor.core.TileShape
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import java.awt.Component
 import kotlin.math.abs
@@ -415,6 +417,8 @@ interface Nds3DView {
   var activeLayer: Int
   var activeTile: Int
   var activeHeight: Int
+  /** Width and depth, in map squares, of the paint cursor and one paint operation. */
+  var brushSize: Int
   var brushCollision: Int
   var showGrid: Boolean
   var showCollision: Boolean
@@ -445,4 +449,58 @@ interface Nds3DView {
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component
+}
+
+/** Cells covered by a square brush, matching NdsProject.surfaceBrushCells' centering rule. */
+internal fun ndsBrushFootprint(
+    x: Int,
+    z: Int,
+    size: Int,
+    cols: Int,
+    rows: Int,
+): List<Pair<Int, Int>> {
+  val span = size.coerceAtLeast(1)
+  val originX = x - (span - 1) / 2
+  val originZ = z - (span - 1) / 2
+  return buildList(span * span) {
+    for (dz in 0 until span) for (dx in 0 until span) {
+      val cellX = originX + dx
+      val cellZ = originZ + dz
+      if (cellX in 0 until cols && cellZ in 0 until rows) add(cellX to cellZ)
+    }
+  }
+}
+
+/** Render-space top of the tile being edited in one cell. */
+internal fun ndsPaintCursorHeight(
+    grid: NdsGrid,
+    x: Int,
+    z: Int,
+    activeLayer: Int,
+    terrainHeight: Double,
+    modelScale: Float,
+    customGeometry: Map<Int, List<NdsTri>>,
+): Double {
+  fun layerTop(layer: Int): Double {
+    val base = terrainHeight + grid.heightAt(layer, x, z)
+    val tile = grid.tileAt(layer, x, z)
+    if (NdsTileset.isCustom(tile)) {
+      val meshTop = customGeometry[tile].orEmpty()
+          .maxOfOrNull { maxOf(it.ay, it.by, it.cy) } ?: 0f
+      return base + meshTop * modelScale
+    }
+    val definition = NdsTileset.tiles.getOrNull(tile)
+    return base + when (definition?.shape) {
+      TileShape.CUBE, TileShape.BLOCK -> definition.height.toDouble()
+      else -> 0.0
+    }
+  }
+
+  // The edit still targets activeLayer, but the cursor must remain visible over any higher layer
+  // already occupying this square. Otherwise its quad intersects the visible tile above it.
+  var top = layerTop(activeLayer.coerceIn(0, NdsGrid.LAYERS - 1))
+  for (layer in 0 until NdsGrid.LAYERS) {
+    if (grid.tileAt(layer, x, z) >= 0) top = maxOf(top, layerTop(layer))
+  }
+  return top
 }
