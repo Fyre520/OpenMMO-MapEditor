@@ -119,27 +119,6 @@ tasks.register<JavaExec>("surfaceDiagnostic") {
   args(projectDir.parentFile.absolutePath, providers.gradleProperty("map").getOrElse("MAP_NATIONAL_PARK"))
 }
 
-tasks.register<JavaExec>("lumiSceneExport") {
-  dependsOn(tasks.classes)
-  classpath = sourceSets.main.get().runtimeClasspath
-  mainClass.set("de.lananahwp.openmmo.mapeditor.LumiSceneExportKt")
-  args(
-      providers.gradleProperty("decomp").getOrElse(projectDir.parentFile.resolve("decomp/pokeheartgold").absolutePath),
-      providers.gradleProperty("map").getOrElse("MAP_ROUTE_1"),
-      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("lumi-scene").get().asFile.absolutePath))
-  providers.gradleProperty("rom").orNull?.takeIf(String::isNotBlank)?.let { args(it) }
-}
-
-tasks.register<JavaExec>("lumiSceneBatchExport") {
-  dependsOn(tasks.classes)
-  classpath = sourceSets.main.get().runtimeClasspath
-  mainClass.set("de.lananahwp.openmmo.mapeditor.LumiSceneBatchExportKt")
-  args(
-      providers.gradleProperty("decomp").getOrElse(projectDir.parentFile.resolve("decomp/pokeheartgold").absolutePath),
-      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("lumi-scenes").get().asFile.absolutePath))
-  providers.gradleProperty("rom").orNull?.takeIf(String::isNotBlank)?.let { args(it) }
-}
-
 tasks.register<JavaExec>("spriteDiagnostic") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath
