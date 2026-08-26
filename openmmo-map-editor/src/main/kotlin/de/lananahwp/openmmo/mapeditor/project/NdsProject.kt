@@ -10,6 +10,7 @@ import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 import de.lananahwp.openmmo.mapeditor.model.NdsBgEvent
 import de.lananahwp.openmmo.mapeditor.model.NdsEvents
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGrassField
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
 import de.lananahwp.openmmo.mapeditor.model.NdsMapHeader
 import de.lananahwp.openmmo.mapeditor.model.NdsObject
@@ -1718,13 +1719,15 @@ class NdsProject(
   fun customTileTrianglesFor(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
     val geometry = customTileStore.viewGeometry()
     if (geometry.isEmpty()) return emptyList()
+    val overlays = customTileStore.tiles().filter { it.overlay }.map { it.index }.toSet()
     val surface = tileSurfaceHeights(map)
     val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
     for (layer in 0 until de.lananahwp.openmmo.mapeditor.model.NdsGrid.LAYERS) {
       for (x in 0 until map.grid.cols) for (z in 0 until map.grid.rows) {
         val tile = map.grid.tileAt(layer, x, z)
         if (!de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(tile)) continue
-        val base = tileBaseHeight(surface, map.grid, layer, x, z)
+        val overlayLift = if (tile in overlays) NdsGrid.OVERLAY_LIFT else 0f
+        val base = tileBaseHeight(surface, map.grid, layer, x, z) + overlayLift
         for (triangle in geometry[tile].orEmpty()) {
           out +=
               triangle.copy(
@@ -1740,6 +1743,11 @@ class NdsProject(
               )
         }
       }
+    }
+    out += NdsGrassField.triangles(map.grid, geometry) { fringe ->
+      val ground = surface.getOrNull(fringe.x)?.getOrNull(fringe.z)
+          ?.takeUnless(Float::isNaN) ?: 0f
+      ground + fringe.sourceHeight + NdsGrid.OVERLAY_LIFT
     }
     return out
   }
@@ -1778,6 +1786,7 @@ class NdsProject(
             de.lananahwp.openmmo.mapeditor.core.NdsTileset::isCustom)?.let(::add)
       }
     }
+    if (NdsGrassField.INTERIOR in this) addAll(NdsGrassField.COMPONENTS)
   }
 
   private fun editablePropTriangles(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {

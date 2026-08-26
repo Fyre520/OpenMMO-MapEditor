@@ -9,11 +9,15 @@ import java.io.File
  * squares cut produced a tile. Written to explain squares that refuse to select.
  */
 fun main(args: Array<String>) {
-  val root = File(args.getOrElse(0) { "." }, "decomp/pokeheartgold")
+  val decomp = if (args.getOrElse(2) { "hgss" }.equals("pt", ignoreCase = true))
+    "pokeplatinum" else "pokeheartgold"
+  val root = File(args.getOrElse(0) { "." }, "decomp/$decomp")
   val mapName = args.getOrElse(1) { "MAP_NATIONAL_PARK" }
   val project = NdsProject(root)
   val map = project.loadMap(mapName) ?: error("cannot load $mapName")
   val terrain = project.trianglesFor(map)
+  val textures = project.texturesFor(map)
+  val palettes = project.palettesFor(map)
   println("$mapName: ${terrain.size} terrain triangles, grid ${map.grid.cols}x${map.grid.rows}")
 
   var produced = 0
@@ -54,6 +58,35 @@ fun main(args: Array<String>) {
   emptyExamples.forEach { println("   $it") }
   println("top textures chosen: " +
       textureCount.entries.sortedByDescending { it.value }.take(8).joinToString { "${it.key}=${it.value}" })
+
+  println()
+  println("--- transparent terrain materials ---")
+  val materialTriangles = terrain.filter { it.texture.isNotEmpty() }.groupBy { it.texture }
+  for ((name, triangles) in materialTriangles.toSortedMap()) {
+    val texture = textures[name] ?: continue
+    val paletteName = triangles.firstOrNull()?.palette.orEmpty()
+    val pixels = palettes[paletteName]?.let(texture::decodeWith) ?: texture.decode() ?: continue
+    val transparent = pixels.count { it ushr 24 == 0 }
+    if (transparent > 0) {
+      println("  $name: $transparent/${pixels.size} transparent pixels, tris=${triangles.size}")
+      val cells = triangles.asSequence().map { triangle ->
+        kotlin.math.floor((triangle.ax + triangle.bx + triangle.cx) / 3f).toInt() to
+            kotlin.math.floor((triangle.az + triangle.bz + triangle.cz) / 3f).toInt()
+      }.filter { (x, z) -> x in 0 until map.grid.cols && z in 0 until map.grid.rows }
+          .distinct().take(2).toList()
+      for ((x, z) in cells) {
+        val present = NdsProject.filterSurfaceTriangles(
+            terrain, setOf(NdsProject.surfaceCellKey(x, z)), cut = NdsProject.SurfaceCut.FREEFORM)
+            .groupBy { it.texture }
+            .map { (material, faces) ->
+              val low = faces.minOf { minOf(it.ay, it.by, it.cy) }
+              val high = faces.maxOf { maxOf(it.ay, it.by, it.cy) }
+              "$material@%.2f..%.2f".format(low, high)
+            }
+        println("    cell $x,$z also contains $present")
+      }
+    }
+  }
 
   // How often does the chosen surface sit above another one in the same square? That is the case
   // where the square is built from an overhead layer (canopy, tall grass) instead of the floor.

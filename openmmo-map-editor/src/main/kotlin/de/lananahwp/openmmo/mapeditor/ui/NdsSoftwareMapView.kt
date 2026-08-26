@@ -2,6 +2,7 @@ package de.lananahwp.openmmo.mapeditor.ui
 
 import de.lananahwp.openmmo.mapeditor.core.NdsTileset
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGrassField
 import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Cursor
@@ -104,6 +105,11 @@ class NdsSoftwareMapView(
       field = value
       repaint()
     }
+  override var customTileOverlays: Set<Int> = emptySet()
+    set(value) {
+      field = value
+      repaint()
+    }
 
   /**
    * Painted project-defined tiles, moved into their cells so the textured pass can draw them
@@ -121,7 +127,8 @@ class NdsSoftwareMapView(
         val tile = g.tileAt(layer, x, z)
         if (tile < 0 || !de.lananahwp.openmmo.mapeditor.core.NdsTileset.isCustom(tile)) continue
         val geometry = customTileGeometry[tile] ?: continue
-        val base = g.heightAt(layer, x, z).toFloat()
+        val overlayLift = if (tile in customTileOverlays) NdsGrid.OVERLAY_LIFT else 0f
+        val base = g.heightAt(layer, x, z).toFloat() + overlayLift
         for (t in geometry) {
           out += t.copy(
               ax = x + t.ax, ay = base + t.ay, az = z + t.az,
@@ -130,6 +137,9 @@ class NdsSoftwareMapView(
           )
         }
       }
+    }
+    out += NdsGrassField.triangles(g, customTileGeometry) { fringe ->
+      fringe.sourceHeight.toFloat() + NdsGrid.OVERLAY_LIFT
     }
     return out
   }
@@ -527,11 +537,14 @@ class NdsSoftwareMapView(
   /** Projects decoded NSBMD triangles into painter-sorted faces, scaled to fit the grid. */
   private fun drawModelTriangles(out: MutableList<Face>, cam: Camera) {
     if (modelOpacity <= 0f) return
-    val m = modelXform() ?: return
-    for (tri in modelTriangles) {
-      val a = project(viewCoords(cam, xform(tri.ax, tri.ay, tri.az, m)))
-      val b = project(viewCoords(cam, xform(tri.bx, tri.by, tri.bz, m)))
-      val c = project(viewCoords(cam, xform(tri.cx, tri.cy, tri.cz, m)))
+    val m = modelXform()
+    val triangles = modelTriangles + placedCustomTileTriangles().filter {
+      it.texture.isEmpty() || it.texture !in modelTextures
+    }
+    for (tri in triangles) {
+      val a = project(viewCoords(cam, viewPoint(tri.ax, tri.ay, tri.az, m)))
+      val b = project(viewCoords(cam, viewPoint(tri.bx, tri.by, tri.bz, m)))
+      val c = project(viewCoords(cam, viewPoint(tri.cx, tri.cy, tri.cz, m)))
       if (a == null || b == null || c == null) continue
       val depth = (a[2] + b[2] + c[2]) / 3.0
       val original = Color(tri.color, true)
@@ -551,7 +564,7 @@ class NdsSoftwareMapView(
   /** Depth-buffered texture-mapped rendering of textured model triangles. */
   private fun drawTexturedTriangles(g2: Graphics2D) {
     if (modelOpacity <= 0f) return
-    val m = modelXform() ?: return
+    val m = modelXform()
     // Painted custom tiles join the map's own geometry here so they are textured and
     // depth-buffered against it rather than drawn as flat colour.
     val textured = (modelTriangles + placedCustomTileTriangles())
@@ -573,9 +586,9 @@ class NdsSoftwareMapView(
             tex.decode()
           }
           ?: continue
-      val pa = project(viewCoords(cam, xform(tri.ax, tri.ay, tri.az, m))) ?: continue
-      val pb = project(viewCoords(cam, xform(tri.bx, tri.by, tri.bz, m))) ?: continue
-      val pc = project(viewCoords(cam, xform(tri.cx, tri.cy, tri.cz, m))) ?: continue
+      val pa = project(viewCoords(cam, viewPoint(tri.ax, tri.ay, tri.az, m))) ?: continue
+      val pb = project(viewCoords(cam, viewPoint(tri.bx, tri.by, tri.bz, m))) ?: continue
+      val pc = project(viewCoords(cam, viewPoint(tri.cx, tri.cy, tri.cz, m))) ?: continue
       // perspective-correct interpolation weights
       val wa = 1f / pa[2].toFloat()
       val wb = 1f / pb[2].toFloat()
@@ -636,6 +649,11 @@ class NdsSoftwareMapView(
     if (wrapped < 0) wrapped += period
     return if (flip && wrapped >= size) period - 1 - wrapped else wrapped
   }
+
+  /** Uses raw grid space for template-only custom maps, which have no NSBMD transform. */
+  private fun viewPoint(x: Float, y: Float, z: Float, transform: ModelXform?): DoubleArray =
+      if (transform == null) doubleArrayOf(x.toDouble(), y.toDouble(), z.toDouble())
+      else xform(x, y, z, transform)
 
   /** Multiplies an ARGB pixel by a (ARGB) diffuse color's RGB channels. */
   private fun modulate(pixel: Int, diffuse: Int): Int {

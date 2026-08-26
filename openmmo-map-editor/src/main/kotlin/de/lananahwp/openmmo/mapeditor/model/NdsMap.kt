@@ -10,6 +10,8 @@ class NdsGrid(val cols: Int = 32, val rows: Int = 32) {
     const val COLS = 32
     const val ROWS = 32
     const val LAYERS = 8
+    /** Small separation used for transparent detail surfaces resting on an existing tile. */
+    const val OVERLAY_LIFT = 0.02f
   }
 
   /** [layer][x][y] -> tile index, or -1 when the cell is empty. */

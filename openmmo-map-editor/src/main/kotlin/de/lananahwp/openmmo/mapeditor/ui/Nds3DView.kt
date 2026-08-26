@@ -450,9 +450,30 @@ interface Nds3DView {
    * the same names the triangles reference.
    */
   var customTileGeometry: Map<Int, List<NdsTri>>
+  /** Custom tile ids whose transparent geometry is drawn over an existing ground tile. */
+  var customTileOverlays: Set<Int>
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component
+}
+
+/** First layer where an overlay stamp fits without overwriting any existing tile. */
+internal fun ndsOverlayLayer(
+    grid: NdsGrid,
+    preferredLayer: Int,
+    x: Int,
+    z: Int,
+    width: Int,
+    height: Int,
+): Int? {
+  for (layer in preferredLayer.coerceIn(0, NdsGrid.LAYERS - 1) until NdsGrid.LAYERS) {
+    var free = true
+    for (dx in 0 until width) for (dz in 0 until height) {
+      if (grid.tileAt(layer, x + dx, z + dz) >= 0) free = false
+    }
+    if (free) return layer
+  }
+  return null
 }
 
 internal fun ndsTriangleOpacity(triangle: NdsTri, modelOpacity: Float, propOpacity: Float): Float =

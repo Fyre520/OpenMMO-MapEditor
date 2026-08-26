@@ -31,6 +31,25 @@ class NdsCustomTileStoreTest {
   }
 
   @Test
+  fun `internal tile visibility persists`() {
+    val root = Files.createTempDirectory("nds-hidden-tile").toFile()
+    try {
+      val triangle = NdsTri(
+          0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f,
+          color = -1, u0 = 0f, v0 = 0f, u1 = 0f, v1 = 0f, u2 = 0f, v2 = 0f)
+      val store = NdsCustomTileStore(root)
+      store.add("Internal grass edge", NdsMeshSnapshot(listOf(triangle), emptyMap(), emptyMap()),
+          overlay = true, hidden = true)
+      store.invalidate()
+
+      assertTrue(store.tiles().single().hidden)
+      assertTrue(store.tiles().single().overlay)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
   fun `project tile library lives beside maps and props`() {
     val root = Files.createTempDirectory("nds-project-tiles").toFile()
     try {

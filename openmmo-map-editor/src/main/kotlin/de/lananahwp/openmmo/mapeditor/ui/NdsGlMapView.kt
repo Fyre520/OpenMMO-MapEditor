@@ -12,6 +12,7 @@ import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.core.NdsTileset
 import de.lananahwp.openmmo.mapeditor.core.TileShape
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGrassField
 import java.awt.Color
 import java.awt.Cursor
 import java.awt.event.MouseAdapter
@@ -101,6 +102,11 @@ class NdsGlMapView(
   override var surfacePicking: Boolean = false
 
   override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
+    set(value) {
+      field = value
+      repaint()
+    }
+  override var customTileOverlays: Set<Int> = emptySet()
     set(value) {
       field = value
       repaint()
@@ -440,7 +446,8 @@ class NdsGlMapView(
           // Squares with no terrain over them keep sitting on the grid plane, so paint stays
           // visible on the open ground around a map as well as on the map itself.
           val ground = surface?.get(x)?.get(z)?.takeIf { !it.isNaN() } ?: 0.0
-          val base = ground + g.heightAt(layer, x, z).toDouble()
+          val overlayLift = if (tile in customTileOverlays) NdsGrid.OVERLAY_LIFT else 0f
+          val base = ground + g.heightAt(layer, x, z).toDouble() + overlayLift
           if (NdsTileset.isCustom(tile)) {
             customTileGeometry[tile]?.let { drawCustomTile(gl, xf, it, x, z, base) }
             continue
@@ -465,6 +472,12 @@ class NdsGlMapView(
         }
       }
     }
+    for (fringe in NdsGrassField.fringes(g)) {
+      val ground = surface?.get(fringe.x)?.get(fringe.z)?.takeIf { !it.isNaN() } ?: 0.0
+      val base = ground + fringe.sourceHeight + NdsGrid.OVERLAY_LIFT
+      val geometry = NdsGrassField.rotated(customTileGeometry[fringe.tile].orEmpty(), fringe.turns)
+      drawCustomTile(gl, xf, geometry, fringe.x, fringe.z, base)
+    }
     gl.glDisable(GL2.GL_POLYGON_OFFSET_FILL)
     gl.glDisable(GL2.GL_BLEND)
     gl.glEnable(GL2.GL_LIGHTING)
@@ -486,10 +499,12 @@ class NdsGlMapView(
       cellZ: Int,
       base: Double,
   ) {
-    if (triangles.isEmpty() || xf == null) return
+    if (triangles.isEmpty()) return
     gl.glEnable(GL2.GL_ALPHA_TEST)
     gl.glAlphaFunc(GL2.GL_GREATER, 0.05f)
     var boundTex = -1
+    var boundWrapS = Int.MIN_VALUE
+    var boundWrapT = Int.MIN_VALUE
     var texturingOn = false
     for (tri in triangles) {
       val texId = if (tri.texture.isNotEmpty()) glTextureId(gl, tri.texture, tri.palette) else -1
@@ -498,9 +513,22 @@ class NdsGlMapView(
         if (wantTextured) gl.glEnable(GL2.GL_TEXTURE_2D) else gl.glDisable(GL2.GL_TEXTURE_2D)
         texturingOn = wantTextured
       }
-      if (texId != boundTex) {
+      val textureChanged = texId != boundTex
+      if (textureChanged) {
         gl.glBindTexture(GL2.GL_TEXTURE_2D, if (texId == -1) 0 else texId)
         boundTex = texId
+      }
+      if (texId != -1) {
+        val wrapS = textureWrapMode(tri.repeatS, tri.flipS)
+        val wrapT = textureWrapMode(tri.repeatT, tri.flipT)
+        if (textureChanged || wrapS != boundWrapS) {
+          gl.glTexParameteri(GL2.GL_TEXTURE_2D, GL2.GL_TEXTURE_WRAP_S, wrapS)
+          boundWrapS = wrapS
+        }
+        if (textureChanged || wrapT != boundWrapT) {
+          gl.glTexParameteri(GL2.GL_TEXTURE_2D, GL2.GL_TEXTURE_WRAP_T, wrapT)
+          boundWrapT = wrapT
+        }
       }
       val tex = if (texId != -1) modelTextures[tri.texture] else null
       val tw = tex?.width ?: 1
@@ -529,14 +557,15 @@ class NdsGlMapView(
       th: Int,
       textured: Boolean,
       tri: de.lananahwp.openmmo.mapeditor.core.NdsTri,
-      xf: ModelXform,
+      xf: ModelXform?,
       cellX: Int,
       cellZ: Int,
       base: Double,
   ) {
     if (textured) gl.glTexCoord2f((u / tw) * tri.scaleS, 1f - (v / th) * tri.scaleT)
     // Tile space is one unit per square, so the cell index is the translation.
-    groundVertex(gl, (cellX + x).toDouble(), base + y * xf.scale, (cellZ + z).toDouble(), xf)
+    val placedY = base + if (xf == null) y else y * xf.scale
+    groundVertex(gl, (cellX + x).toDouble(), placedY, (cellZ + z).toDouble(), xf)
   }
 
   private fun drawTileCube(

@@ -116,7 +116,26 @@ tasks.register<JavaExec>("surfaceDiagnostic") {
   dependsOn(tasks.classes)
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.SurfaceDiagnosticKt")
-  args(projectDir.parentFile.absolutePath, providers.gradleProperty("map").getOrElse("MAP_NATIONAL_PARK"))
+  args(
+      projectDir.parentFile.absolutePath,
+      providers.gradleProperty("map").getOrElse("MAP_NATIONAL_PARK"),
+      providers.gradleProperty("family").getOrElse("hgss"),
+  )
+}
+
+tasks.register<JavaExec>("hgssGrassDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.HgssGrassDiagnosticKt")
+  args(projectDir.parentFile.absolutePath)
+}
+
+tasks.register<JavaExec>("hgssGrassTiles") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.HgssGrassTileGeneratorKt")
+  args(projectDir.parentFile.absolutePath)
+  if (providers.gradleProperty("writeGrassTiles").orNull == "true") args("--write")
 }
 
 tasks.register<JavaExec>("spriteDiagnostic") {
@@ -124,13 +143,4 @@ tasks.register<JavaExec>("spriteDiagnostic") {
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.core.NdsSpriteDiagnosticKt")
   args(providers.gradleProperty("rom").getOrElse(""))
-}
-
-tasks.register<JavaExec>("playerSpriteExport") {
-  dependsOn(tasks.classes)
-  classpath = sourceSets.main.get().runtimeClasspath
-  mainClass.set("de.lananahwp.openmmo.mapeditor.core.NdsPlayerSpriteExportKt")
-  args(
-      providers.gradleProperty("rom").getOrElse(""),
-      providers.gradleProperty("output").getOrElse(layout.buildDirectory.dir("player-sprites").get().asFile.absolutePath))
 }

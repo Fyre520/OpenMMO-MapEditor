@@ -26,6 +26,10 @@ class NdsCustomTileStore(rootDir: File) {
       val source: String? = null,
       val width: Int = 1,
       val height: Int = 1,
+      /** Transparent surface detail that is placed above, rather than replacing, ground. */
+      val overlay: Boolean = false,
+      /** Generator/runtime building block retained for saved maps but omitted from the picker. */
+      val hidden: Boolean = false,
   )
 
   private var cache: List<TileInfo>? = null
@@ -65,6 +69,8 @@ class NdsCustomTileStore(rootDir: File) {
             o.str("source"),
             o.int("width")?.coerceAtLeast(1) ?: 1,
             o.int("height")?.coerceAtLeast(1) ?: 1,
+            o.get("overlay")?.asBool() ?: false,
+            o.get("hidden")?.asBool() ?: false,
         )
       }
     } catch (_: Throwable) {
@@ -81,6 +87,8 @@ class NdsCustomTileStore(rootDir: File) {
       source: String? = null,
       width: Int = 1,
       height: Int = 1,
+      overlay: Boolean = false,
+      hidden: Boolean = false,
   ): TileInfo {
     require(snapshot.triangles.isNotEmpty()) { "That selection has no geometry to add as a tile" }
     require(width >= 1 && height >= 1) { "Tile footprint must be at least 1x1" }
@@ -92,23 +100,70 @@ class NdsCustomTileStore(rootDir: File) {
     tileDir(index).mkdirs()
     NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
 
-    val updated = existing + TileInfo(index, label, source, width, height)
+    val updated = existing + TileInfo(index, label, source, width, height, overlay, hidden)
+    writeIndex(updated)
+    cache = updated
+    meshCache.remove(index)
+    return TileInfo(index, label, source, width, height, overlay, hidden)
+  }
+
+  /** Replaces one generated tile without changing the stable index already used by maps. */
+  fun replace(
+      index: Int,
+      name: String,
+      snapshot: NdsMeshSnapshot,
+      overlay: Boolean? = null,
+      width: Int? = null,
+      height: Int? = null,
+      hidden: Boolean? = null,
+  ): TileInfo {
+    require(snapshot.triangles.isNotEmpty()) { "Replacement tile has no geometry" }
+    val existing = tiles()
+    val old = existing.firstOrNull { it.index == index } ?: error("Unknown tile $index")
+    val replacement = old.copy(
+        name = name.trim().ifEmpty { old.name },
+        overlay = overlay ?: old.overlay,
+        width = width?.coerceAtLeast(1) ?: old.width,
+        height = height?.coerceAtLeast(1) ?: old.height,
+        hidden = hidden ?: old.hidden,
+    )
+    NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
+    val updated = existing.map { if (it.index == index) replacement else it }
+    writeIndex(updated)
+    cache = updated
+    meshCache.remove(index)
+    return replacement
+  }
+
+  /** Removes exactly the named generated tile indices, leaving every other stable index intact. */
+  fun remove(indices: Set<Int>) {
+    if (indices.isEmpty()) return
+    val existing = tiles()
+    val known = existing.map { it.index }.toSet()
+    require(indices.all { it in known }) { "Cannot remove unknown tile indices" }
+    for (index in indices) tileDir(index).deleteRecursively()
+    val updated = existing.filterNot { it.index in indices }
+    writeIndex(updated)
+    cache = updated
+    indices.forEach(meshCache::remove)
+  }
+
+  private fun writeIndex(updated: List<TileInfo>) {
     val json = Json.JObj(linkedMapOf(
-        "version" to Json.JNum(3.0),
+        "version" to Json.JNum(5.0),
         "tiles" to Json.JArr(updated.map { t ->
           Json.JObj(linkedMapOf(
               "index" to Json.JNum(t.index.toDouble()),
               "name" to Json.JStr(t.name),
-              "width" to Json.JNum(t.width.toDouble()),
-              "height" to Json.JNum(t.height.toDouble()),
+            "width" to Json.JNum(t.width.toDouble()),
+            "height" to Json.JNum(t.height.toDouble()),
+            "overlay" to Json.JBool(t.overlay),
+            "hidden" to Json.JBool(t.hidden),
           ).also { entries -> t.source?.let { entries["source"] = Json.JStr(it) } })
         }),
     ))
     indexFile().parentFile?.mkdirs()
     indexFile().writeText(JsonWriter.writePretty(json) + "\n")
-    cache = updated
-    meshCache.remove(index)
-    return TileInfo(index, label, source, width, height)
   }
 
   /** The geometry for a tile, in unit-square tile space. */

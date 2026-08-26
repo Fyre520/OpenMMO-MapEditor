@@ -6,6 +6,7 @@ import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import de.lananahwp.openmmo.mapeditor.project.NdsProject
 import de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView
+import de.lananahwp.openmmo.mapeditor.ui.ndsOverlayLayer
 import de.lananahwp.openmmo.mapeditor.ui.ndsTileSurfaceHeights
 import java.awt.event.MouseEvent
 import java.io.File
@@ -28,6 +29,7 @@ fun main(args: Array<String>) {
   testRecentring()
   testSnapshotRoundTrip()
   testCustomTiles()
+  testOverlayLayerPlacement()
   testTilesRestOnTheTerrainUnderThem()
   testTileSpaceKeepsItsSize()
   testWallsAreOptional()
@@ -80,7 +82,7 @@ private fun testCustomTiles() {
 
     val first = store.add("Olivine path", snapshot)
     check(first.index == base) { "first tile should take the base index, got ${first.index}" }
-    val second = store.add("Park grass", snapshot, "PLATINUM:$base")
+    val second = store.add("Park grass", snapshot, "PLATINUM:$base", overlay = true)
     check(second.index == base + 1) { "indices must advance, got ${second.index}" }
 
     // Reloading from disk must preserve both the order and the numbers.
@@ -89,6 +91,7 @@ private fun testCustomTiles() {
     check(listed.map { it.index } == listOf(base, base + 1)) { "tile indices changed on reload" }
     check(listed.map { it.name } == listOf("Olivine path", "Park grass")) { "tile order changed" }
     check(listed[1].source == "PLATINUM:$base") { "import source was not preserved" }
+    check(!listed[0].overlay && listed[1].overlay) { "overlay tile type was not preserved" }
 
     // The store rests a tile on y=0 and otherwise stores exactly what it was handed. It must
     // never rescale: the fixture is two tiles across, and it has to stay two tiles across.
@@ -127,6 +130,26 @@ private fun testCustomTiles() {
     }
   } finally {
     root.deleteRecursively()
+  }
+}
+
+/** Overlay tiles occupy a higher saved layer and never destroy the ground they decorate. */
+private fun testOverlayLayerPlacement() {
+  val grid = NdsGrid(4, 4)
+  check(ndsOverlayLayer(grid, 0, 1, 1, 1, 1) == 0) {
+    "an overlay over ROM terrain should use the requested empty layer"
+  }
+  grid.setTile(0, 1, 1, 2)
+  check(ndsOverlayLayer(grid, 0, 1, 1, 1, 1) == 1) {
+    "an overlay should preserve occupied ground on layer 0"
+  }
+  grid.setTile(1, 2, 1, 3)
+  check(ndsOverlayLayer(grid, 0, 1, 1, 2, 1) == 2) {
+    "a multi-square overlay must find one layer free across its whole footprint"
+  }
+  for (layer in 0 until NdsGrid.LAYERS) grid.setTile(layer, 3, 3, layer)
+  check(ndsOverlayLayer(grid, 0, 3, 3, 1, 1) == null) {
+    "a full layer stack must not overwrite one of its existing tiles"
   }
 }
 

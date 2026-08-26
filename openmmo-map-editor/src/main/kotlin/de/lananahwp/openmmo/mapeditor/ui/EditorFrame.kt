@@ -13,6 +13,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsCellEdit
 import de.lananahwp.openmmo.mapeditor.model.NdsCellKind
 import de.lananahwp.openmmo.mapeditor.model.NdsEditHistory
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGrassField
 import de.lananahwp.openmmo.mapeditor.model.NdsGridStep
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
 import de.lananahwp.openmmo.mapeditor.model.NdsMapCropper
@@ -243,6 +244,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           "Select Object / Move Prop",
           "Remove Scenery Object",
           "Pick Surface -> Prop",
+          "Grass Field",
       ))
   private val ndsGridCheck = JCheckBox("Grid")
   private val ndsCollisionCheck = JCheckBox("Collisions")
@@ -654,7 +656,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       view()?.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     }
     ndsPaintMode.addActionListener {
-      view()?.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
+      view()?.setPaintMode(
+          if (ndsPaintMode.selectedIndex == 7) 0 else ndsPaintMode.selectedIndex.coerceAtLeast(0))
       onNdsPaintModeChanged()
     }
     ndsGridCheck.isSelected = true
@@ -814,7 +817,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsViewContainer.add(created.asComponent(), BorderLayout.CENTER)
     ndsViewContainer.revalidate()
     ndsViewContainer.repaint()
-    created.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
+    created.setPaintMode(if (ndsPaintMode.selectedIndex == 7) 0 else ndsPaintMode.selectedIndex.coerceAtLeast(0))
     created.showGrid = ndsGridCheck.isSelected
     created.showCollision = ndsCollisionCheck.isSelected
     created.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
@@ -2913,7 +2916,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun onNdsPaintModeChanged() {
     val surfaceMode = ndsPaintMode.selectedIndex == 6
     // The first four modes are the ones that write a square at a time.
-    ndsTileBrushSpinner.isEnabled = ndsPaintMode.selectedIndex in 0..3
+    ndsTileBrushSpinner.isEnabled =
+        ndsPaintMode.selectedIndex in 0..3 || ndsPaintMode.selectedIndex == 7
     ndsSurfaceBrushSpinner.isEnabled = surfaceMode
     ndsSurfaceSameTexture.isEnabled = surfaceMode
     ndsSurfaceIncludeWalls.isEnabled = surfaceMode
@@ -2937,6 +2941,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       status.text =
           "Height: drag raises squares to the set height, Ctrl+drag returns them to 0 " +
               "· Ctrl+Z undoes a stroke"
+    } else if (ndsPaintMode.selectedIndex == 7) {
+      status.text =
+          "Paint Grass: drag to grow a connected HGSS field; edges are automatic; " +
+              "Ctrl+drag removes grass"
     }
   }
 
@@ -2960,12 +2968,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     }
     val custom = projects.flatMap { project ->
       val familyTag = if (project.family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.PLATINUM)
-        "Pt" else project.family.displayName
-      project.customTileStore.tiles().map { tile ->
+        "Pt" else "HGSS"
+      project.customTileStore.tiles().filterNot { it.hidden }.map { tile ->
         val footprint = if (tile.width == 1 && tile.height == 1) "" else " (${tile.width}x${tile.height})"
+        val kind = if (tile.overlay) " [Overlay]" else ""
         NdsTileChoice(
             tile.index,
-            "[$familyTag] ${tile.name}$footprint",
+            "[$familyTag] ${tile.name}$footprint$kind",
             project,
         )
       }
@@ -2996,6 +3005,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun selectNdsTileChoice() {
     if (refreshingNdsTileCombo) return
     val choice = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex) ?: return
+    // Paint Grass deliberately ignores the Tile combo and writes its internal field marker.
+    // Choosing a tile is therefore an explicit request to go back to ordinary tile painting.
+    if (ndsPaintMode.selectedIndex == 7) ndsPaintMode.selectedIndex = 0
     val active = currentNdsHolder?.project
     if (choice.project == null || active == null || choice.project === active) {
       setNdsActiveTile(choice.index)
@@ -3008,7 +3020,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val existing = active.customTileStore.tiles().firstOrNull { it.source == sourceKey }
     val local = existing ?: sourceProject.customTileStore.mesh(sourceTile.index)?.let { snapshot ->
       active.customTileStore.add(
-          sourceTile.name, snapshot, sourceKey, sourceTile.width, sourceTile.height)
+          sourceTile.name, snapshot, sourceKey, sourceTile.width, sourceTile.height,
+          sourceTile.overlay)
     }
     if (local == null) {
       status.text = "Could not load '${sourceTile.name}' from ${sourceProject.family.displayName}"
@@ -3058,6 +3071,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.modelTextures = textures
     v.modelPalettes = palettes
     v.customTileGeometry = store.viewGeometry()
+    v.customTileOverlays = store.tiles().filter { it.overlay }.map { it.index }.toSet()
   }
 
   /** Adds a rectangular set of picked squares as one anchored paintable tile stamp. */
@@ -3107,13 +3121,25 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       )
       return
     }
-    val name = JOptionPane.showInputDialog(
-        this, "Tile name", "Add as Tile", JOptionPane.PLAIN_MESSAGE, null, null,
-        "${map.displayName} tile")?.toString()?.trim()
-    if (name.isNullOrEmpty()) return
+    val nameField = JTextField("${map.displayName} tile", 28)
+    val overlay = JCheckBox("Overlay tile (preserve and show the tile underneath)")
+    overlay.toolTipText =
+        "For transparent grass edges, rocks, shadows, and other surface details"
+    val fields = JPanel(BorderLayout(0, 8)).apply {
+      add(JPanel(BorderLayout(8, 0)).apply {
+        add(JLabel("Tile name"), BorderLayout.WEST)
+        add(nameField, BorderLayout.CENTER)
+      }, BorderLayout.NORTH)
+      add(overlay, BorderLayout.SOUTH)
+    }
+    val accepted = JOptionPane.showConfirmDialog(
+        this, fields, "Add as Tile", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE)
+    if (accepted != JOptionPane.OK_OPTION) return
+    val name = nameField.text.trim()
+    if (name.isEmpty()) return
     try {
       val tile = holder.project.customTileStore.add(
-          name, snapshot, width = tileWidth, height = tileHeight)
+          name, snapshot, width = tileWidth, height = tileHeight, overlay = overlay.isSelected)
       refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
       refreshNdsTileCombo(tile.index)
       ndsPaintMode.selectedIndex = 0
@@ -3563,6 +3589,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         1 -> "collision"
         2 -> "permission"
         3 -> "height"
+        7 -> "grass"
         else -> "tile"
       }
 
@@ -3658,11 +3685,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun paintNdsCell(x: Int, z: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
+    if (ndsPaintMode.selectedIndex == 7) {
+      paintNdsGrass(map, view, x, z, erase = false)
+      return
+    }
     val layer = view.activeLayer
     val height = ndsPaintMode.selectedIndex == 3
-    val stamp = if (height) null else currentNdsHolder?.project?.customTileStore?.tiles()
-        ?.firstOrNull { it.index == view.activeTile }
+    val tileStore = currentNdsHolder?.project?.customTileStore
+    val storedTiles = if (height) emptyList() else tileStore?.tiles().orEmpty()
+    val stamp = storedTiles.firstOrNull { it.index == view.activeTile }
+    val overlayIds = storedTiles.filter { it.overlay }.map { it.index }.toSet()
     var painted = 0
+    var overlayFull = false
     for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
       if (height) {
         ndsHistory.recordCell(NdsCellEdit(
@@ -3672,15 +3706,41 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       } else {
         if (stamp != null &&
             (cx + stamp.width > map.grid.cols || cz + stamp.height > map.grid.rows)) continue
+        val targetLayer = if (stamp?.overlay == true) {
+          // Repainting an overlay cell replaces its existing detail instead of building an
+          // invisible stack every time the brush crosses that square.
+          (layer until NdsGrid.LAYERS).firstOrNull {
+            map.grid.tileAt(it, cx, cz) in overlayIds
+          } ?: ndsOverlayLayer(map.grid, layer, cx, cz, stamp.width, stamp.height)
+        } else layer
+        if (targetLayer == null) {
+          overlayFull = true
+          continue
+        }
+        // When the active layer already contains ground, an overlay moves above it. Carry its
+        // painted height along so the detail remains attached to that ground surface.
+        if (targetLayer != layer) {
+          val inheritedHeight = map.grid.heightAt(layer, cx, cz)
+          if (map.grid.heightAt(targetLayer, cx, cz) != inheritedHeight) {
+            ndsHistory.recordCell(NdsCellEdit(
+                NdsCellKind.HEIGHT, targetLayer, cx, cz,
+                map.grid.heightAt(targetLayer, cx, cz), inheritedHeight))
+            map.grid.setHeight(targetLayer, cx, cz, inheritedHeight)
+          }
+        }
         ndsHistory.recordCell(NdsCellEdit(
-            NdsCellKind.TILE, layer, cx, cz,
-            map.grid.tileAt(layer, cx, cz), view.activeTile))
-        map.grid.setTile(layer, cx, cz, view.activeTile)
+            NdsCellKind.TILE, targetLayer, cx, cz,
+            map.grid.tileAt(targetLayer, cx, cz), view.activeTile))
+        map.grid.setTile(targetLayer, cx, cz, view.activeTile)
       }
       painted++
     }
     if (!height && painted == 0 && stamp != null) {
-      status.text = "${stamp.width}x${stamp.height} tile does not fit at that map edge"
+      status.text = if (overlayFull) {
+        "No free overlay layer is available on that square"
+      } else {
+        "${stamp.width}x${stamp.height} tile does not fit at that map edge"
+      }
       return
     }
     markDirty()
@@ -3696,21 +3756,84 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun eraseNdsCell(x: Int, z: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
+    if (ndsPaintMode.selectedIndex == 7) {
+      paintNdsGrass(map, view, x, z, erase = true)
+      return
+    }
     val layer = view.activeLayer
     val height = ndsPaintMode.selectedIndex == 3
+    val selectedOverlay = currentNdsHolder?.project?.customTileStore?.tiles()
+        ?.firstOrNull { it.index == view.activeTile }?.overlay == true
     for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
       if (height) {
         ndsHistory.recordCell(NdsCellEdit(
             NdsCellKind.HEIGHT, layer, cx, cz, map.grid.heightAt(layer, cx, cz), 0))
         map.grid.setHeight(layer, cx, cz, 0)
       } else {
+        val targetLayer = if (selectedOverlay) {
+          (layer until NdsGrid.LAYERS).firstOrNull {
+            map.grid.tileAt(it, cx, cz) == view.activeTile
+          } ?: layer
+        } else layer
         // -1 is the grid's own empty value, the same one a fresh map starts every square at.
         ndsHistory.recordCell(NdsCellEdit(
-            NdsCellKind.TILE, layer, cx, cz, map.grid.tileAt(layer, cx, cz), -1))
-        map.grid.setTile(layer, cx, cz, -1)
+            NdsCellKind.TILE, targetLayer, cx, cz, map.grid.tileAt(targetLayer, cx, cz), -1))
+        map.grid.setTile(targetLayer, cx, cz, -1)
+        if (selectedOverlay && targetLayer != layer && map.grid.heightAt(targetLayer, cx, cz) != 0) {
+          ndsHistory.recordCell(NdsCellEdit(
+              NdsCellKind.HEIGHT, targetLayer, cx, cz,
+              map.grid.heightAt(targetLayer, cx, cz), 0))
+          map.grid.setHeight(targetLayer, cx, cz, 0)
+        }
       }
     }
     markDirty()
+    view.asComponent().repaint()
+  }
+
+  /** Stores only grass interiors; [NdsGrassField] derives the authentic fringe around them. */
+  private fun paintNdsGrass(map: NdsMap, view: Nds3DView, x: Int, z: Int, erase: Boolean) {
+    val store = currentNdsHolder?.project?.customTileStore ?: return
+    if (store.tiles().none { it.index == NdsGrassField.INTERIOR }) {
+      status.text = "This HGSS grass library has not been generated for the active project"
+      return
+    }
+    val activeLayer = view.activeLayer
+    var changed = 0
+    for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
+      val existingLayer = (0 until NdsGrid.LAYERS).firstOrNull {
+        map.grid.tileAt(it, cx, cz) == NdsGrassField.INTERIOR
+      }
+      if (erase) {
+        val target = existingLayer ?: continue
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.TILE, target, cx, cz, NdsGrassField.INTERIOR, -1))
+        map.grid.setTile(target, cx, cz, -1)
+        if (target != activeLayer && map.grid.heightAt(target, cx, cz) != 0) {
+          ndsHistory.recordCell(NdsCellEdit(
+              NdsCellKind.HEIGHT, target, cx, cz, map.grid.heightAt(target, cx, cz), 0))
+          map.grid.setHeight(target, cx, cz, 0)
+        }
+        changed++
+        continue
+      }
+      if (existingLayer != null) continue
+      val target = ndsOverlayLayer(map.grid, activeLayer, cx, cz, 1, 1)
+      if (target == null) continue
+      val inheritedHeight = map.grid.heightAt(activeLayer, cx, cz)
+      if (target != activeLayer && map.grid.heightAt(target, cx, cz) != inheritedHeight) {
+        ndsHistory.recordCell(NdsCellEdit(
+            NdsCellKind.HEIGHT, target, cx, cz,
+            map.grid.heightAt(target, cx, cz), inheritedHeight))
+        map.grid.setHeight(target, cx, cz, inheritedHeight)
+      }
+      ndsHistory.recordCell(NdsCellEdit(
+          NdsCellKind.TILE, target, cx, cz,
+          map.grid.tileAt(target, cx, cz), NdsGrassField.INTERIOR))
+      map.grid.setTile(target, cx, cz, NdsGrassField.INTERIOR)
+      changed++
+    }
+    if (changed > 0) markDirty()
     view.asComponent().repaint()
   }
 
@@ -3853,7 +3976,6 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   companion object {
     private const val CONFIG_FILE = ".openmmo-map-editor.json"
-
     @JvmStatic
     fun show(dirs: List<File>) {
       SwingUtilities.invokeLater { EditorFrame(dirs).isVisible = true }
