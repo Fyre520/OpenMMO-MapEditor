@@ -5,9 +5,57 @@ import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class NdsCustomTileStoreTest {
+  @Test
+  fun `requested tile code persists and cannot be reused`() {
+    val root = Files.createTempDirectory("nds-explicit-tile-code").toFile()
+    try {
+      val triangle = NdsTri(
+          0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f,
+          color = -1, u0 = 0f, v0 = 0f, u1 = 0f, v1 = 0f, u2 = 0f, v2 = 0f)
+      val snapshot = NdsMeshSnapshot(listOf(triangle), emptyMap(), emptyMap())
+      val store = NdsCustomTileStore(root)
+
+      val saved = store.add("Chosen code", snapshot, requestedIndex = 1234)
+
+      assertEquals(1234, saved.index)
+      assertTrue(root.resolve("tile-1234_Chosen_code/mesh.bin").isFile)
+      assertEquals(1235, store.nextAvailableIndex())
+      store.invalidate()
+      assertEquals(1, store.mesh(1234)?.triangles?.size)
+      val failure = assertFailsWith<IllegalArgumentException> {
+        store.add("Duplicate", snapshot, requestedIndex = 1234)
+      }
+      assertTrue(failure.message.orEmpty().contains("already used"))
+      assertEquals(listOf("Chosen code"), store.tiles().map { it.name })
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `requested tile code cannot overlap built in codes`() {
+    val root = Files.createTempDirectory("nds-reserved-tile-code").toFile()
+    try {
+      val triangle = NdsTri(
+          0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f,
+          color = -1, u0 = 0f, v0 = 0f, u1 = 0f, v1 = 0f, u2 = 0f, v2 = 0f)
+      val store = NdsCustomTileStore(root)
+
+      assertFailsWith<IllegalArgumentException> {
+        store.add(
+            "Reserved", NdsMeshSnapshot(listOf(triangle), emptyMap(), emptyMap()),
+            requestedIndex = 13)
+      }
+      assertTrue(store.tiles().isEmpty())
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
   @Test
   fun `multi-square tile footprint persists`() {
     val root = Files.createTempDirectory("nds-multi-tile").toFile()

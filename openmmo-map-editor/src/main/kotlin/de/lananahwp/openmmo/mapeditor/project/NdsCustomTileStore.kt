@@ -32,6 +32,12 @@ class NdsCustomTileStore(rootDir: File) {
       val hidden: Boolean = false,
   )
 
+  /** Opaque recovery record returned when tiles are moved out of the live catalog. */
+  class Archive internal constructor(
+      internal val removed: List<TileInfo>,
+      internal val movedDirectories: List<Pair<File, File>>,
+  )
+
   private var cache: List<TileInfo>? = null
   private val meshCache = HashMap<Int, NdsMeshSnapshot?>()
 
@@ -48,7 +54,41 @@ class NdsCustomTileStore(rootDir: File) {
 
   private fun indexFile(): File = File(rootDir, "tiles.json")
 
-  private fun tileDir(index: Int): File = File(rootDir, "tile-$index")
+  private fun legacyTileDir(index: Int): File = File(rootDir, "tile-$index")
+
+  private fun namedTileDir(index: Int, name: String): File {
+    val suffix = name.trim()
+        .replace(Regex("[^A-Za-z0-9]+"), "_")
+        .trim('_')
+        .ifEmpty { "Tile" }
+    return File(rootDir, "tile-${index}_$suffix")
+  }
+
+  private fun tileDirs(index: Int): List<File> {
+    val legacyName = "tile-$index"
+    val namedPrefix = "${legacyName}_"
+    return rootDir.listFiles().orEmpty().filter {
+      it.isDirectory && (it.name == legacyName || it.name.startsWith(namedPrefix))
+    }
+  }
+
+  private fun existingTileDir(index: Int, preferredName: String? = null): File? {
+    preferredName?.let { name -> namedTileDir(index, name).takeIf(File::isDirectory)?.let { return it } }
+    legacyTileDir(index).takeIf(File::isDirectory)?.let { return it }
+    return tileDirs(index).sortedBy { it.name }.firstOrNull()
+  }
+
+  /** The next unused custom-tile code offered by the editor. */
+  fun nextAvailableIndex(): Int {
+    var candidate = (tiles().maxOfOrNull { it.index }?.plus(1))
+        ?: NdsTileset.CUSTOM_TILE_BASE
+    candidate = maxOf(candidate, NdsTileset.CUSTOM_TILE_BASE)
+    while (existingTileDir(candidate) != null) {
+      check(candidate < Int.MAX_VALUE) { "No custom tile codes remain" }
+      candidate++
+    }
+    return candidate
+  }
 
   /**
    * Every stored tile, in the order they were added.
@@ -89,16 +129,27 @@ class NdsCustomTileStore(rootDir: File) {
       height: Int = 1,
       overlay: Boolean = false,
       hidden: Boolean = false,
+      requestedIndex: Int? = null,
   ): TileInfo {
     require(snapshot.triangles.isNotEmpty()) { "That selection has no geometry to add as a tile" }
     require(width >= 1 && height >= 1) { "Tile footprint must be at least 1x1" }
     val existing = tiles()
-    // Never reuse a number, even one whose tile was deleted by hand: saved grids may still name it.
-    val index = existing.maxOfOrNull { it.index }?.plus(1) ?: NdsTileset.CUSTOM_TILE_BASE
+    val index = requestedIndex ?: nextAvailableIndex()
+    require(index >= NdsTileset.CUSTOM_TILE_BASE) {
+      "Custom tile code must be ${NdsTileset.CUSTOM_TILE_BASE} or higher"
+    }
+    val occupyingTile = existing.firstOrNull { it.index == index }
+    require(occupyingTile == null) {
+      "Tile code $index is already used by '${occupyingTile?.name}'"
+    }
+    require(existingTileDir(index) == null) {
+      "Tile code $index already has stored tile data"
+    }
     val label = name.trim().ifEmpty { "Tile $index" }
+    val destination = namedTileDir(index, label)
 
-    tileDir(index).mkdirs()
-    NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
+    destination.mkdirs()
+    NdsMeshSnapshot.write(File(destination, "mesh.bin"), restOnGround(snapshot))
 
     val updated = existing + TileInfo(index, label, source, width, height, overlay, hidden)
     writeIndex(updated)
@@ -127,7 +178,13 @@ class NdsCustomTileStore(rootDir: File) {
         height = height?.coerceAtLeast(1) ?: old.height,
         hidden = hidden ?: old.hidden,
     )
-    NdsMeshSnapshot.write(File(tileDir(index), "mesh.bin"), restOnGround(snapshot))
+    val destination = existingTileDir(index, old.name) ?: namedTileDir(index, replacement.name)
+    destination.mkdirs()
+    NdsMeshSnapshot.write(File(destination, "mesh.bin"), restOnGround(snapshot))
+    val readableDestination = namedTileDir(index, replacement.name)
+    if (destination != readableDestination && !readableDestination.exists()) {
+      destination.renameTo(readableDestination)
+    }
     val updated = existing.map { if (it.index == index) replacement else it }
     writeIndex(updated)
     cache = updated
@@ -141,11 +198,82 @@ class NdsCustomTileStore(rootDir: File) {
     val existing = tiles()
     val known = existing.map { it.index }.toSet()
     require(indices.all { it in known }) { "Cannot remove unknown tile indices" }
-    for (index in indices) tileDir(index).deleteRecursively()
+    for (index in indices) tileDirs(index).forEach(File::deleteRecursively)
     val updated = existing.filterNot { it.index in indices }
     writeIndex(updated)
     cache = updated
     indices.forEach(meshCache::remove)
+  }
+
+  /**
+   * Removes tiles without destroying their files, so a Clear Assets operation can be undone.
+   * [backupRoot] must be unique to this operation.
+   */
+  fun archive(indices: Set<Int>, backupRoot: File): Archive {
+    if (indices.isEmpty()) return Archive(emptyList(), emptyList())
+    val existing = tiles()
+    val removed = existing.filter { it.index in indices }
+    require(removed.size == indices.size) { "Cannot archive unknown tile indices" }
+    val moves = mutableListOf<Pair<File, File>>()
+    try {
+      backupRoot.mkdirs()
+      for (tile in removed) {
+        val directories = tileDirs(tile.index)
+        for (source in directories) {
+          val destination = File(backupRoot, source.name)
+          require(!destination.exists()) { "Recovery folder already contains ${source.name}" }
+          moveDirectory(source, destination)
+          moves += source to destination
+        }
+      }
+      val updated = existing.filterNot { it.index in indices }
+      writeIndex(updated)
+      cache = updated
+      indices.forEach(meshCache::remove)
+      return Archive(removed, moves)
+    } catch (failure: Throwable) {
+      for ((original, backup) in moves.asReversed()) {
+        if (backup.exists() && !original.exists()) runCatching { moveDirectory(backup, original) }
+      }
+      throw failure
+    }
+  }
+
+  /** Restores a previous [archive] operation, including its stable tile codes. */
+  fun restore(archive: Archive) {
+    if (archive.removed.isEmpty()) return
+    val existing = tiles()
+    val restoringIndices = archive.removed.map { it.index }.toSet()
+    require(existing.none { it.index in restoringIndices }) {
+      "A deleted tile code has been reused and cannot be restored"
+    }
+    require(archive.movedDirectories.all { (original, backup) ->
+      !original.exists() && backup.isDirectory
+    }) { "Some deleted tile data can no longer be restored" }
+
+    val restoredMoves = mutableListOf<Pair<File, File>>()
+    try {
+      for ((original, backup) in archive.movedDirectories) {
+        moveDirectory(backup, original)
+        restoredMoves += original to backup
+      }
+      val updated = (existing + archive.removed).sortedBy { it.index }
+      writeIndex(updated)
+      cache = updated
+      restoringIndices.forEach(meshCache::remove)
+    } catch (failure: Throwable) {
+      for ((original, backup) in restoredMoves.asReversed()) {
+        if (original.exists() && !backup.exists()) runCatching { moveDirectory(original, backup) }
+      }
+      throw failure
+    }
+  }
+
+  private fun moveDirectory(source: File, destination: File) {
+    destination.parentFile?.mkdirs()
+    if (source.renameTo(destination)) return
+    source.copyRecursively(destination, overwrite = false)
+    check(source.deleteRecursively()) { "Could not remove ${source.path} after copying it" }
   }
 
   private fun writeIndex(updated: List<TileInfo>) {
@@ -169,7 +297,9 @@ class NdsCustomTileStore(rootDir: File) {
   /** The geometry for a tile, in unit-square tile space. */
   fun mesh(index: Int): NdsMeshSnapshot? {
     if (index in meshCache) return meshCache[index]
-    val loaded = NdsMeshSnapshot.read(File(tileDir(index), "mesh.bin"))
+    val tile = tiles().firstOrNull { it.index == index }
+    val directory = existingTileDir(index, tile?.name)
+    val loaded = directory?.let { NdsMeshSnapshot.read(File(it, "mesh.bin")) }
     meshCache[index] = loaded
     return loaded
   }

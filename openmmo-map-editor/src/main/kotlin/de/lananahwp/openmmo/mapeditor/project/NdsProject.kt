@@ -24,6 +24,7 @@ import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurface
 import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurfaceDirection
 import java.io.File
 import java.awt.Color
+import java.nio.file.Files
 import kotlin.math.floor
 
 /** A Gen 4 DS map project backed by a decomp (and optionally a matching ROM). */
@@ -718,6 +719,20 @@ class NdsProject(
       val triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
       val textures: Map<String, de.lananahwp.openmmo.mapeditor.core.NdsTexture>,
       val palettes: Map<String, IntArray>,
+  )
+
+  /** Project-owned assets that no saved or currently loaded editor map references. */
+  data class AssetCleanupCandidates(
+      val extractedProps: List<PropModelInfo>,
+      val tiles: List<NdsCustomTileStore.TileInfo>,
+  )
+
+  /** Opaque recovery record for one Clear Assets deletion in this project. */
+  class AssetCleanupUndo internal constructor(
+      internal val propDirectories: List<Pair<File, File>>,
+      internal val tileArchive: NdsCustomTileStore.Archive,
+      internal val recoveryRoot: File,
+      internal var restored: Boolean = false,
   )
   val decomp = Gen4Decomp(rootDir)
   val family get() = decomp.family
@@ -2466,9 +2481,9 @@ class NdsProject(
     return ModelImportResult(checked.first, checked.second, textureFile != null)
   }
 
-  /** ROM building models plus reusable models imported into this project. */
-  fun propModels(): List<PropModelInfo> {
-    val imported = propModelsDir().listFiles()
+  /** Reusable models stored with this project, without opening the ROM model catalog. */
+  fun customPropModels(): List<PropModelInfo> =
+      propModelsDir().listFiles()
         ?.filter { it.isDirectory && File(it, "model.json").isFile }
         ?.mapNotNull { dir ->
           try {
@@ -2495,6 +2510,10 @@ class NdsProject(
         }
         ?.sortedBy { it.label.lowercase() }
         .orEmpty()
+
+  /** ROM building models plus reusable models imported into this project. */
+  fun propModels(): List<PropModelInfo> {
+    val imported = customPropModels()
     val romModels = buildModelFiles.orEmpty().indices.drop(1).map { id ->
       val description = NdsPropCatalog.describe(family, id, propModelTriangles("rom:$id"))
       PropModelInfo(
@@ -2505,6 +2524,161 @@ class NdsProject(
       )
     }
     return imported + romModels
+  }
+
+  private data class AssetUsage(
+      val propModelKeys: Set<String>,
+      val tileIndices: Set<Int>,
+  )
+
+  /** Finds cleanup candidates across every saved override/custom map and every loaded map. */
+  fun unusedCustomAssets(): AssetCleanupCandidates {
+    val usage = assetUsage()
+    return AssetCleanupCandidates(
+        customPropModels().filter {
+          it.category == EXTRACTED_CATEGORY && it.key !in usage.propModelKeys
+        },
+        customTileStore.tiles().filter { it.index !in usage.tileIndices },
+    )
+  }
+
+  private fun assetUsage(): AssetUsage {
+    val propKeys = LinkedHashSet<String>()
+    val tileIndices = LinkedHashSet<Int>()
+
+    fun addMap(map: NdsMap) {
+      propKeys += map.props.map { it.modelKey }
+      propKeys += map.terrainRemovals.mapNotNull { it.removedProp?.modelKey }
+      tileIndices += usedCustomTiles(map)
+    }
+    maps.values.forEach(::addMap)
+
+    fun addGridFile(file: File) {
+      if (!file.isFile) return
+      runCatching {
+        val root = JsonParser.parse(file.readText()).asObj() ?: return@runCatching
+        for (layer in 0 until NdsGrid.LAYERS) {
+          root.arr("layer_$layer")?.items.orEmpty().forEach { item ->
+            item.asObj()?.int("tile")
+                ?.takeIf(NdsTileset::isCustom)
+                ?.let(tileIndices::add)
+          }
+        }
+      }
+    }
+
+    fun addPropsFile(file: File) {
+      if (!file.isFile) return
+      runCatching {
+        val root = JsonParser.parse(file.readText()).asObj() ?: return@runCatching
+        root.arr("props")?.items.orEmpty().forEach { item ->
+          item.asObj()?.str("modelKey")?.let(propKeys::add)
+        }
+        root.arr("terrainRemovals")?.items.orEmpty().forEach { item ->
+          item.asObj()?.obj("removedProp")?.str("modelKey")?.let(propKeys::add)
+        }
+      }
+    }
+
+    overrideDir().listFiles().orEmpty()
+        .filter { it.isFile && it.extension.equals("json", ignoreCase = true) }
+        .forEach(::addGridFile)
+    customMapsDir().listFiles().orEmpty().filter(File::isDirectory).forEach { directory ->
+      addGridFile(File(directory, "grid.json"))
+      addPropsFile(File(directory, "props.json"))
+    }
+    if (NdsGrassField.INTERIOR in tileIndices) tileIndices += NdsGrassField.COMPONENTS
+    return AssetUsage(propKeys, tileIndices)
+  }
+
+  /**
+   * Moves still-unused assets into a temporary recovery directory and removes them from catalogs.
+   * The returned token can be passed to [undoAssetCleanup].
+   */
+  fun deleteUnusedAssets(
+      extractedPropKeys: Set<String>,
+      tileIndices: Set<Int>,
+  ): AssetCleanupUndo {
+    require(extractedPropKeys.isNotEmpty() || tileIndices.isNotEmpty()) {
+      "Choose at least one asset to delete"
+    }
+    val candidates = unusedCustomAssets()
+    val unusedProps = candidates.extractedProps.map { it.key }.toSet()
+    val unusedTiles = candidates.tiles.map { it.index }.toSet()
+    require(extractedPropKeys.all { it in unusedProps }) {
+      "A selected prop is now in use or is not an extracted prop"
+    }
+    require(tileIndices.all { it in unusedTiles }) {
+      "A selected tile is now in use"
+    }
+
+    val recoveryRoot = Files.createTempDirectory("openmmo-asset-cleanup-").toFile()
+    val tileArchive = customTileStore.archive(tileIndices, File(recoveryRoot, "tiles"))
+    val propMoves = mutableListOf<Pair<File, File>>()
+    try {
+      for (key in extractedPropKeys.sorted()) {
+        val source = propModelDir(key)
+        require(source.isDirectory) { "Prop '$key' has no stored model data" }
+        val backup = File(recoveryRoot, "props/${source.name}")
+        require(!backup.exists()) { "Recovery folder already contains ${source.name}" }
+        moveDirectory(source, backup)
+        propMoves += source to backup
+        propTriangleCache.remove(key)
+        propTexturePackCache.remove(key)
+        propMeshCache.remove(key)
+      }
+      return AssetCleanupUndo(propMoves, tileArchive, recoveryRoot)
+    } catch (failure: Throwable) {
+      for ((original, backup) in propMoves.asReversed()) {
+        if (backup.exists() && !original.exists()) runCatching { moveDirectory(backup, original) }
+      }
+      runCatching { customTileStore.restore(tileArchive) }
+      recoveryRoot.deleteRecursively()
+      throw failure
+    }
+  }
+
+  /** Restores every prop and tile represented by one cleanup token. */
+  fun undoAssetCleanup(undo: AssetCleanupUndo) {
+    require(!undo.restored) { "That asset deletion has already been undone" }
+    require(undo.propDirectories.all { (original, backup) ->
+      !original.exists() && backup.isDirectory
+    }) { "Some deleted prop data can no longer be restored" }
+
+    customTileStore.restore(undo.tileArchive)
+    val restoredProps = mutableListOf<Pair<File, File>>()
+    try {
+      for ((original, backup) in undo.propDirectories) {
+        moveDirectory(backup, original)
+        restoredProps += original to backup
+      }
+    } catch (failure: Throwable) {
+      for ((original, backup) in restoredProps.asReversed()) {
+        if (original.exists() && !backup.exists()) runCatching { moveDirectory(original, backup) }
+      }
+      val restoredIndices = undo.tileArchive.removed.map { it.index }.toSet()
+      runCatching {
+        customTileStore.archive(restoredIndices, File(undo.recoveryRoot, "tiles"))
+      }
+      throw failure
+    }
+    undo.propDirectories.forEach { (original, _) ->
+      val key = runCatching {
+        JsonParser.parse(File(original, "model.json").readText()).asObj()?.str("key")
+      }.getOrNull() ?: return@forEach
+      propTriangleCache.remove(key)
+      propTexturePackCache.remove(key)
+      propMeshCache.remove(key)
+    }
+    undo.restored = true
+    undo.recoveryRoot.deleteRecursively()
+  }
+
+  private fun moveDirectory(source: File, destination: File) {
+    destination.parentFile?.mkdirs()
+    if (source.renameTo(destination)) return
+    source.copyRecursively(destination, overwrite = false)
+    check(source.deleteRecursively()) { "Could not remove ${source.path} after copying it" }
   }
 
   /** Decodes one catalog entry with the texture set used by the currently open map. */

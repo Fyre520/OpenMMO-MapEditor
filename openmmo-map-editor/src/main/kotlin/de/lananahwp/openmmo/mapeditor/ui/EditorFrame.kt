@@ -282,6 +282,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsSurfaceCut = JComboBox(arrayOf("Whole squares", "Free-form"))
   private val ndsSurfaceSaveButton = JButton("Save selection as prop...")
   private val ndsSurfaceAddTileButton = JButton("Add as tile")
+  private val ndsClearAssetsButton = JButton("Clear Assets...")
 
   /** One Tile-combo row. Null [project] means a built-in procedural tile. */
   private data class NdsTileChoice(val index: Int, val label: String, val project: NdsProject?)
@@ -290,6 +291,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var refreshingNdsTileCombo = false
   private val ndsSurfaceClearButton = JButton("Clear selection")
   private val ndsSurfaceCells = LinkedHashSet<Long>()
+  private val ndsAssetCleanupUndo =
+      java.util.ArrayDeque<List<Pair<NdsProject, NdsProject.AssetCleanupUndo>>>()
 
   private var ndsWalkPaintStart: Pair<Int, Int>? = null
   private var ndsWalkPaintCurrent: Pair<Int, Int>? = null
@@ -780,6 +783,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsSurfaceAddTileButton.toolTipText =
         "Add the picked rectangular area to the Tile list as a reusable multi-square stamp"
     ndsSurfaceAddTileButton.addActionListener { addNdsSurfaceSelectionAsTile() }
+    ndsClearAssetsButton.toolTipText =
+        "Review extracted props and custom tiles that are unused across every editor map"
+    ndsClearAssetsButton.addActionListener { showNdsAssetCleanup() }
     ndsSurfaceClearButton.addActionListener {
       clearNdsSurfaceSelection()
       status.text = "Cleared the surface selection"
@@ -823,6 +829,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     surfaceToolbar.add(ndsSurfaceSaveButton)
     surfaceToolbar.add(ndsSurfaceAddTileButton)
     surfaceToolbar.add(ndsSurfaceClearButton)
+    surfaceToolbar.add(ndsClearAssetsButton)
     surfaceToolbar.add(JLabel("  Drag paints · Shift+drag boxes · Ctrl removes"))
     onNdsPaintModeChanged()
     panel.add(JPanel(GridLayout(3, 1)).also {
@@ -3885,7 +3892,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           .sortedBy { if (it === active) 0 else 1 }
     }
     val builtIns = NdsTileset.tiles.mapIndexed { index, tile ->
-      NdsTileChoice(index, tile.name, null)
+      NdsTileChoice(index, "${tile.name} (#$index)", null)
     }
     val custom = projects.flatMap { project ->
       val familyTag = if (project.family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.PLATINUM)
@@ -3895,7 +3902,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         val kind = if (tile.overlay) " [Overlay]" else ""
         NdsTileChoice(
             tile.index,
-            "[$familyTag] ${tile.name}$footprint$kind",
+            "[$familyTag] ${tile.name}$footprint$kind (#${tile.index})",
             project,
         )
       }
@@ -3997,6 +4004,83 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.customTileOverlays = store.tiles().filter { it.overlay }.map { it.index }.toSet()
   }
 
+  private fun showNdsAssetCleanup() {
+    if (ndsHolders.isEmpty()) {
+      JOptionPane.showMessageDialog(
+          this, "Open a HeartGold/SoulSilver or Platinum project first.",
+          "Clear Assets", JOptionPane.INFORMATION_MESSAGE)
+      return
+    }
+    NdsAssetCleanupDialog(
+        this,
+        loadEntries = ::ndsAssetCleanupEntries,
+        canUndo = { ndsAssetCleanupUndo.isNotEmpty() },
+        deleteEntries = ::deleteNdsCleanupEntries,
+        undoLastDelete = ::undoLastNdsAssetCleanup,
+    ).isVisible = true
+  }
+
+  private fun ndsAssetCleanupEntries(): List<NdsCleanupAssetEntry> = buildList {
+    for (project in ndsHolders.values.map { it.project }.distinct()) {
+      val familyTag = if (project.family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.PLATINUM)
+        "Pt" else "HGSS"
+      val candidates = project.unusedCustomAssets()
+      for (prop in candidates.extractedProps) {
+        add(NdsCleanupAssetEntry(
+            project, NdsCleanupAssetKind.PROP, prop.key,
+            "[$familyTag] ${prop.label} (${prop.key})"))
+      }
+      for (tile in candidates.tiles) {
+        val details = buildList {
+          if (tile.width != 1 || tile.height != 1) add("${tile.width}x${tile.height}")
+          if (tile.overlay) add("overlay")
+          if (tile.hidden) add("hidden")
+        }.joinToString(", ").let { if (it.isEmpty()) "" else " — $it" }
+        add(NdsCleanupAssetEntry(
+            project, NdsCleanupAssetKind.TILE, tile.index.toString(),
+            "[$familyTag] ${tile.name} (#${tile.index})$details"))
+      }
+    }
+  }.sortedWith(compareBy<NdsCleanupAssetEntry>({ it.kind }, { it.label.lowercase() }))
+
+  private fun deleteNdsCleanupEntries(entries: List<NdsCleanupAssetEntry>) {
+    val completed = mutableListOf<Pair<NdsProject, NdsProject.AssetCleanupUndo>>()
+    try {
+      for ((project, selected) in entries.groupBy { it.project }) {
+        val props = selected.filter { it.kind == NdsCleanupAssetKind.PROP }.map { it.key }.toSet()
+        val tiles = selected.filter { it.kind == NdsCleanupAssetKind.TILE }
+            .map { it.key.toInt() }.toSet()
+        completed += project to project.deleteUnusedAssets(props, tiles)
+      }
+    } catch (failure: Throwable) {
+      for ((project, undo) in completed.asReversed()) {
+        runCatching { project.undoAssetCleanup(undo) }
+            .onFailure(failure::addSuppressed)
+      }
+      throw failure
+    }
+    ndsAssetCleanupUndo.addLast(completed)
+    refreshNdsAssetCatalogs()
+  }
+
+  private fun undoLastNdsAssetCleanup() {
+    val batch = ndsAssetCleanupUndo.peekLast() ?: return
+    for ((project, undo) in batch.asReversed()) project.undoAssetCleanup(undo)
+    ndsAssetCleanupUndo.removeLast()
+    refreshNdsAssetCatalogs()
+  }
+
+  private fun refreshNdsAssetCatalogs() {
+    val map = currentNdsMap
+    val holder = currentNdsHolder
+    if (map != null && holder != null) {
+      refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
+    }
+    refreshNdsTileCombo()
+    rebuildNdsPropCatalog()
+    ndsView?.asComponent()?.repaint()
+  }
+
   /** Adds a rectangular set of picked squares as one anchored paintable tile stamp. */
   private fun addNdsSurfaceSelectionAsTile() {
     val map = currentNdsMap
@@ -4045,32 +4129,54 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       return
     }
     val nameField = JTextField("${map.displayName} tile", 28)
+    val codeField = JTextField(holder.project.customTileStore.nextAvailableIndex().toString(), 8)
     val overlay = JCheckBox("Overlay tile (preserve and show the tile underneath)")
     overlay.toolTipText =
         "For transparent grass edges, rocks, shadows, and other surface details"
     val fields = JPanel(BorderLayout(0, 8)).apply {
-      add(JPanel(BorderLayout(8, 0)).apply {
-        add(JLabel("Tile name"), BorderLayout.WEST)
-        add(nameField, BorderLayout.CENTER)
+      add(JPanel(GridLayout(0, 2, 8, 8)).apply {
+        add(JLabel("Tile name"))
+        add(nameField)
+        add(JLabel("Tile code (${NdsTileset.CUSTOM_TILE_BASE} or higher)"))
+        add(codeField)
       }, BorderLayout.NORTH)
       add(overlay, BorderLayout.SOUTH)
     }
-    val accepted = JOptionPane.showConfirmDialog(
-        this, fields, "Add as Tile", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE)
-    if (accepted != JOptionPane.OK_OPTION) return
-    val name = nameField.text.trim()
-    if (name.isEmpty()) return
-    try {
-      val tile = holder.project.customTileStore.add(
-          name, snapshot, width = tileWidth, height = tileHeight, overlay = overlay.isSelected)
-      refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
-      refreshNdsTileCombo(tile.index)
-      ndsPaintMode.selectedIndex = 0
-      status.text =
-          "Added ${tile.width}x${tile.height} tile '${tile.name}' — selected and ready to paint"
-    } catch (t: Throwable) {
-      JOptionPane.showMessageDialog(
-          this, t.message ?: t.toString(), "Add as Tile failed", JOptionPane.ERROR_MESSAGE)
+    while (true) {
+      val accepted = JOptionPane.showConfirmDialog(
+          this, fields, "Add as Tile", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE)
+      if (accepted != JOptionPane.OK_OPTION) return
+      val name = nameField.text.trim()
+      val code = codeField.text.trim().toIntOrNull()
+      val validationError = when {
+        name.isEmpty() -> "Enter a tile name."
+        code == null -> "Tile code must be a whole number."
+        code < NdsTileset.CUSTOM_TILE_BASE ->
+          "Custom tile code must be ${NdsTileset.CUSTOM_TILE_BASE} or higher."
+        holder.project.customTileStore.tiles().any { it.index == code } ->
+          "Tile code $code is already taken."
+        else -> null
+      }
+      if (validationError != null) {
+        JOptionPane.showMessageDialog(
+            this, validationError, "Invalid tile code", JOptionPane.WARNING_MESSAGE)
+        continue
+      }
+      try {
+        val tile = holder.project.customTileStore.add(
+            name, snapshot, width = tileWidth, height = tileHeight,
+            overlay = overlay.isSelected, requestedIndex = code)
+        refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
+        refreshNdsTileCombo(tile.index)
+        ndsPaintMode.selectedIndex = 0
+        status.text =
+            "Added ${tile.width}x${tile.height} tile '${tile.name}' as code ${tile.index} — " +
+                "selected and ready to paint"
+        return
+      } catch (t: Throwable) {
+        JOptionPane.showMessageDialog(
+            this, t.message ?: t.toString(), "Add as Tile failed", JOptionPane.ERROR_MESSAGE)
+      }
     }
   }
 
