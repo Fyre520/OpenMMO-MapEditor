@@ -144,3 +144,13 @@ tasks.register<JavaExec>("spriteDiagnostic") {
   mainClass.set("de.lananahwp.openmmo.mapeditor.core.NdsSpriteDiagnosticKt")
   args(providers.gradleProperty("rom").getOrElse(""))
 }
+
+tasks.register<JavaExec>("bdhcDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsBdhcDiagnosticKt")
+  args(
+      providers.gradleProperty("rom").getOrElse(""),
+      providers.gradleProperty("family").getOrElse("pt"),
+  )
+}

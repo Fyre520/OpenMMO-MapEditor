@@ -248,6 +248,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       ))
   private val ndsGridCheck = JCheckBox("Grid")
   private val ndsCollisionCheck = JCheckBox("Collisions")
+  private val ndsWalkSurfaceCheck = JCheckBox("Show walk surfaces")
   private val ndsClearCollisionWithTerrain = JCheckBox("Clear collision with object", true)
   private val ndsCollisionEditView = JCheckBox("Transparent collision view")
   private val ndsShowOnlyTiles = JCheckBox("Show only tiles")
@@ -666,6 +667,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsGridCheck.isSelected = true
     ndsGridCheck.addActionListener { view()?.showGrid = ndsGridCheck.isSelected }
     ndsCollisionCheck.addActionListener { view()?.showCollision = ndsCollisionCheck.isSelected }
+    ndsWalkSurfaceCheck.toolTipText =
+        "Show the ROM's invisible BDHC walkable-height plates (read-only; not saved)"
+    ndsWalkSurfaceCheck.addActionListener { refreshNdsWalkSurfaces() }
     ndsCollisionEditView.addActionListener {
       val enabled = ndsCollisionEditView.isSelected
       if (enabled) {
@@ -761,6 +765,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val terrainToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     terrainToolbar.add(ndsCollisionEditView)
     terrainToolbar.add(ndsShowOnlyTiles)
+    terrainToolbar.add(ndsWalkSurfaceCheck)
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsSnapToGridCheck)
     terrainToolbar.add(ndsRestoreTerrainButton)
@@ -827,7 +832,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     created.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     created.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
     created.propOpacity = if (ndsShowOnlyTiles.isSelected) 0.35f else 1f
+    created.walkSurfaceTriangles = currentNdsWalkSurfaces()
     return created
+  }
+
+  /** Resolves the optional ROM BDHC overlay without ever adding it to editable terrain. */
+  private fun currentNdsWalkSurfaces(): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    if (!ndsWalkSurfaceCheck.isSelected) return emptyList()
+    val project = currentNdsHolder?.project ?: return emptyList()
+    val map = currentNdsMap ?: return emptyList()
+    return project.bdhcTrianglesFor(map)
+  }
+
+  private fun refreshNdsWalkSurfaces() {
+    val triangles = currentNdsWalkSurfaces()
+    view()?.walkSurfaceTriangles = triangles
+    status.text = when {
+      !ndsWalkSurfaceCheck.isSelected -> "Walk-surface overlay hidden"
+      triangles.isNotEmpty() -> "Showing ${triangles.size / 2} ROM BDHC walk-surface plate(s)"
+      currentNdsMap?.isCustom == true -> "This custom map has no ROM BDHC walk surfaces"
+      currentNdsMap != null -> "No compatible ROM BDHC walk surfaces are available for this map"
+      else -> "Open a Nintendo DS map to show its ROM BDHC walk surfaces"
+    }
   }
 
   private fun applyNdsVisibilityMode() {
@@ -1319,6 +1345,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         val terrain = holder.project.trianglesFor(map)
         v.surfaceTriangles = terrain
         v.modelTriangles = terrain
+        // An imported mesh no longer matches the ROM's invisible walk planes.
+        v.walkSurfaceTriangles = emptyList()
         v.modelTextures = holder.project.texturesFor(map)
         v.modelPalettes = holder.project.palettesFor(map)
       }
@@ -1665,6 +1693,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val bld = ref.holder.project.buildingTrianglesFor(map)
     v.surfaceTriangles = tris
     v.modelTriangles = if (bld.isEmpty()) tris else tris + bld
+    v.walkSurfaceTriangles = currentNdsWalkSurfaces()
     v.modelTextures = ref.holder.project.texturesFor(map)
     v.modelPalettes = ref.holder.project.palettesFor(map)
     refreshNdsCustomTiles(ref.holder.project.texturesFor(map), ref.holder.project.palettesFor(map))

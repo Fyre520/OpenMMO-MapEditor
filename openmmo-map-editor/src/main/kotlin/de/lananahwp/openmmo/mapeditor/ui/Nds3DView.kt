@@ -402,6 +402,9 @@ interface Nds3DView {
   var grid: NdsGrid?
   var modelTriangles: List<NdsTri>
 
+  /** Read-only ROM walk surfaces, drawn only when the user enables the BDHC debug overlay. */
+  var walkSurfaceTriangles: List<NdsTri>
+
   /**
    * The geometry painted tiles rest on: the map's own terrain, without the props placed on it.
    *

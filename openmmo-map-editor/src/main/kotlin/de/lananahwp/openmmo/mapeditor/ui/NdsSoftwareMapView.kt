@@ -98,6 +98,15 @@ class NdsSoftwareMapView(
 
   private var highlightOutline: List<FloatArray> = emptyList()
 
+  override var walkSurfaceTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      walkSurfaceOutline = value.groupBy { it.editGroup }.values.flatMap(::ndsOutlineEdges)
+      repaint()
+    }
+
+  private var walkSurfaceOutline: List<FloatArray> = emptyList()
+
   override var surfacePicking: Boolean = false
 
   override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
@@ -447,6 +456,7 @@ class NdsSoftwareMapView(
     drawFaces(g2, tiles)
     drawFaces(g2, markerFaces)
     drawTexturedTriangles(g2)
+    drawWalkSurfaceTriangles(g2, cam)
     drawBrushCursor(g2, cam, grid, mx)
     // After the textured pass, so the selection stays visible on top of the geometry it marks.
     drawHighlightTriangles(g2, cam)
@@ -498,6 +508,36 @@ class NdsSoftwareMapView(
     for (e in highlightOutline) {
       val a = project(viewCoords(cam, xform(e[0], e[1], e[2], m))) ?: continue
       val b = project(viewCoords(cam, xform(e[3], e[4], e[5], m))) ?: continue
+      g2.drawLine(a[0].toInt(), a[1].toInt(), b[0].toInt(), b[1].toInt())
+    }
+  }
+
+  /** Draws ROM BDHC after the scene as a non-interactive cyan debug overlay. */
+  private fun drawWalkSurfaceTriangles(g2: Graphics2D, cam: Camera) {
+    if (walkSurfaceTriangles.isEmpty()) return
+    val m = modelXform() ?: return
+    val fill = Color(38, 224, 245, 78)
+    val outline = Color(115, 245, 255, 230)
+    val faces = ArrayList<Face>(walkSurfaceTriangles.size)
+    for (tri in walkSurfaceTriangles) {
+      val a = project(viewCoords(cam, xform(tri.ax, tri.ay, tri.az, m))) ?: continue
+      val b = project(viewCoords(cam, xform(tri.bx, tri.by, tri.bz, m))) ?: continue
+      val c = project(viewCoords(cam, xform(tri.cx, tri.cy, tri.cz, m))) ?: continue
+      faces += Face(
+          (a[2] + b[2] + c[2]) / 3.0,
+          intArrayOf(a[0].toInt(), b[0].toInt(), c[0].toInt()),
+          intArrayOf(a[1].toInt(), b[1].toInt(), c[1].toInt()),
+          fill,
+      )
+    }
+    faces.sortedByDescending { it.depth }.forEach { face ->
+      g2.color = face.fill
+      g2.fillPolygon(face.xs, face.ys, face.xs.size)
+    }
+    g2.color = outline
+    for (edge in walkSurfaceOutline) {
+      val a = project(viewCoords(cam, xform(edge[0], edge[1], edge[2], m))) ?: continue
+      val b = project(viewCoords(cam, xform(edge[3], edge[4], edge[5], m))) ?: continue
       g2.drawLine(a[0].toInt(), a[1].toInt(), b[0].toInt(), b[1].toInt())
     }
   }

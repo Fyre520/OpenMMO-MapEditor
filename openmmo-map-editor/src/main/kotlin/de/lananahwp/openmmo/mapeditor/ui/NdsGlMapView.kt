@@ -99,6 +99,16 @@ class NdsGlMapView(
 
   private var highlightOutline: List<FloatArray> = emptyList()
 
+  override var walkSurfaceTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      // Keep neighbouring plates visibly distinct while dropping each quad's internal diagonal.
+      walkSurfaceOutline = value.groupBy { it.editGroup }.values.flatMap(::ndsOutlineEdges)
+      repaint()
+    }
+
+  private var walkSurfaceOutline: List<FloatArray> = emptyList()
+
   override var surfacePicking: Boolean = false
 
   override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
@@ -287,6 +297,7 @@ class NdsGlMapView(
     drawGround(gl)
     drawModel(gl)
     drawPlacedTiles(gl)
+    drawWalkSurfaces(gl)
     drawBrushCursor(gl)
     drawHighlight(gl)
     drawMarkers(gl)
@@ -737,6 +748,40 @@ class NdsGlMapView(
     for (e in highlightOutline) {
       highlightVertex(gl, e[0], e[1], e[2], xf)
       highlightVertex(gl, e[3], e[4], e[5], xf)
+    }
+    gl.glEnd()
+    gl.glLineWidth(1f)
+
+    gl.glDepthMask(true)
+    gl.glDisable(GL2.GL_BLEND)
+    gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  /** Draws ROM BDHC as a non-interactive cyan debug overlay. */
+  private fun drawWalkSurfaces(gl: GL2) {
+    if (walkSurfaceTriangles.isEmpty()) return
+    val xf = modelXform() ?: return
+    gl.glDisable(GL2.GL_LIGHTING)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glEnable(GL2.GL_BLEND)
+    gl.glBlendFunc(GL2.GL_SRC_ALPHA, GL2.GL_ONE_MINUS_SRC_ALPHA)
+    gl.glDepthMask(false)
+
+    gl.glColor4f(0.15f, 0.88f, 0.96f, 0.30f)
+    gl.glBegin(GL2.GL_TRIANGLES)
+    for (tri in walkSurfaceTriangles) {
+      highlightVertex(gl, tri.ax, tri.ay, tri.az, xf)
+      highlightVertex(gl, tri.bx, tri.by, tri.bz, xf)
+      highlightVertex(gl, tri.cx, tri.cy, tri.cz, xf)
+    }
+    gl.glEnd()
+
+    gl.glColor4f(0.45f, 0.96f, 1f, 0.90f)
+    gl.glLineWidth(1.5f)
+    gl.glBegin(GL2.GL_LINES)
+    for (edge in walkSurfaceOutline) {
+      highlightVertex(gl, edge[0], edge[1], edge[2], xf)
+      highlightVertex(gl, edge[3], edge[4], edge[5], xf)
     }
     gl.glEnd()
     gl.glLineWidth(1f)
