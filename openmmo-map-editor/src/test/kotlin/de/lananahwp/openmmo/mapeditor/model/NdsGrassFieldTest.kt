@@ -15,7 +15,7 @@ class NdsGrassFieldTest {
     assertEquals(8, fringe.size)
     assertEquals(setOf(1 to 1, 2 to 1, 3 to 1, 1 to 2, 3 to 2, 1 to 3, 2 to 3, 3 to 3),
         fringe.map { it.x to it.z }.toSet())
-    assertTrue(fringe.all { it.sourceLayer == 1 && it.sourceHeight == 3 })
+    assertTrue(fringe.all { it.sourceLayer == 1 && it.sourceHeight == 3.0 })
   }
 
   @Test

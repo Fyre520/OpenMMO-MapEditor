@@ -13,8 +13,8 @@ object NdsGrassField {
   const val CORNER_NE = 1039
   val COMPONENTS = setOf(INTERIOR, EDGE_NORTH, EDGE_EAST, EDGE_SOUTH, EDGE_WEST, CORNER_NW, CORNER_NE)
 
-  data class Cell(val x: Int, val z: Int, val layer: Int, val height: Int)
-  data class Fringe(val tile: Int, val x: Int, val z: Int, val sourceLayer: Int, val sourceHeight: Int, val turns: Int = 0)
+  data class Cell(val x: Int, val z: Int, val layer: Int, val height: Double)
+  data class Fringe(val tile: Int, val x: Int, val z: Int, val sourceLayer: Int, val sourceHeight: Double, val turns: Int = 0)
 
   fun cells(grid: NdsGrid): Map<Pair<Int, Int>, Cell> = buildMap {
     for (layer in 0 until NdsGrid.LAYERS) for (x in 0 until grid.cols) for (z in 0 until grid.rows) {

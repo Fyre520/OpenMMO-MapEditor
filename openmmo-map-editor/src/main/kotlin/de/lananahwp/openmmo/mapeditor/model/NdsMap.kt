@@ -17,8 +17,8 @@ class NdsGrid(val cols: Int = 32, val rows: Int = 32) {
   /** [layer][x][y] -> tile index, or -1 when the cell is empty. */
   val tiles = Array(LAYERS) { Array(cols) { IntArray(rows) { -1 } } }
 
-  /** [layer][x][y] -> relative height offset of the placed tile. */
-  val heights = Array(LAYERS) { Array(cols) { IntArray(rows) { 0 } } }
+  /** [layer][x][y] -> relative height offset of the placed tile, in map-tile units. */
+  val heights = Array(LAYERS) { Array(cols) { DoubleArray(rows) { 0.0 } } }
 
   /** Collision value per grid square. */
   val collisions = Array(cols) { IntArray(rows) { 0 } }
@@ -29,15 +29,15 @@ class NdsGrid(val cols: Int = 32, val rows: Int = 32) {
   fun tileAt(layer: Int, x: Int, y: Int): Int =
       if (inBounds(x, y)) tiles[layer][x][y] else -1
 
-  fun heightAt(layer: Int, x: Int, y: Int): Int =
-      if (inBounds(x, y)) heights[layer][x][y] else 0
+  fun heightAt(layer: Int, x: Int, y: Int): Double =
+      if (inBounds(x, y)) heights[layer][x][y] else 0.0
 
   fun setTile(layer: Int, x: Int, y: Int, tileIndex: Int) {
     if (inBounds(x, y)) tiles[layer][x][y] = tileIndex
   }
 
-  fun setHeight(layer: Int, x: Int, y: Int, height: Int) {
-    if (inBounds(x, y)) heights[layer][x][y] = height.coerceIn(-32, 32)
+  fun setHeight(layer: Int, x: Int, y: Int, height: Number) {
+    if (inBounds(x, y)) heights[layer][x][y] = height.toDouble().coerceIn(-32.0, 32.0)
   }
 
   fun collisionAt(x: Int, y: Int): Int = if (inBounds(x, y)) collisions[x][y] else 0
@@ -61,7 +61,7 @@ class NdsGrid(val cols: Int = 32, val rows: Int = 32) {
   fun clearLayer(layer: Int) {
     for (x in 0 until cols) for (y in 0 until rows) {
       tiles[layer][x][y] = -1
-      heights[layer][x][y] = 0
+      heights[layer][x][y] = 0.0
     }
   }
 

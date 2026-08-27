@@ -309,7 +309,7 @@ fun main(args: Array<String>) {
     route1.grid.setHeight(0, 0, 0, 2)
     route1.grid.setCollision(4, 4, 0x80)
     check(route1.grid.tileAt(0, 0, 0) == 6)
-    check(route1.grid.heightAt(0, 0, 0) == 2)
+    check(route1.grid.heightAt(0, 0, 0) == 2.0)
     check(route1.grid.collisionAt(4, 4) == 0x80)
 
     // Grid persistence round-trips to the project override file.

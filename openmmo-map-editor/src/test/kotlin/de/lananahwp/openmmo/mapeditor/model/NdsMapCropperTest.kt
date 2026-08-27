@@ -9,7 +9,7 @@ class NdsMapCropperTest {
   fun `crop preserves selected grid data and translates local coordinates`() {
     val map = customMap(4, 3)
     map.grid.setTile(2, 33, 34, 17)
-    map.grid.setHeight(2, 33, 34, 6)
+    map.grid.setHeight(2, 33, 34, 6.25)
     map.grid.setCollision(33, 34, 9)
     map.grid.setPermission(33, 34, 12)
     map.props += NdsProp("kept", "custom:tree", x = 40f, z = 40f)
@@ -27,7 +27,7 @@ class NdsMapCropperTest {
     assertEquals(64, map.grid.cols)
     assertEquals(32, map.grid.rows)
     assertEquals(17, map.grid.tileAt(2, 1, 2))
-    assertEquals(6, map.grid.heightAt(2, 1, 2))
+    assertEquals(6.25, map.grid.heightAt(2, 1, 2))
     assertEquals(9, map.grid.collisionAt(1, 2))
     assertEquals(12, map.grid.permissionAt(1, 2))
     assertEquals(listOf("kept"), map.props.map { it.id })

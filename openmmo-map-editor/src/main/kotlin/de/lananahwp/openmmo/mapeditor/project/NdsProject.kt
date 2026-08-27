@@ -352,7 +352,7 @@ class NdsProject(
         z: Int,
     ): Float {
       val ground = surface.getOrNull(x)?.getOrNull(z)?.takeUnless(Float::isNaN) ?: 0f
-      return ground + grid.heightAt(layer, x, z)
+      return ground + grid.heightAt(layer, x, z).toFloat()
     }
 
     /**
@@ -1747,7 +1747,7 @@ class NdsProject(
     out += NdsGrassField.triangles(map.grid, geometry) { fringe ->
       val ground = surface.getOrNull(fringe.x)?.getOrNull(fringe.z)
           ?.takeUnless(Float::isNaN) ?: 0f
-      ground + fringe.sourceHeight + NdsGrid.OVERLAY_LIFT
+      ground + fringe.sourceHeight.toFloat() + NdsGrid.OVERLAY_LIFT
     }
     return out
   }
@@ -2796,7 +2796,7 @@ class NdsProject(
         val x = i % grid.cols
         val y = i / grid.cols
         grid.setTile(layer, x, y, c.int("tile") ?: -1)
-        grid.setHeight(layer, x, y, c.int("height") ?: 0)
+        grid.setHeight(layer, x, y, c.double("height") ?: 0.0)
       }
     }
     root.arr("collisions")?.items?.forEachIndexed { i, v ->
@@ -2873,7 +2873,7 @@ class NdsProject(
             Json.JObj(
                 linkedMapOf(
                     "tile" to Json.JNum(grid.tileAt(layer, x, y).toDouble()),
-                    "height" to Json.JNum(grid.heightAt(layer, x, y).toDouble()),
+                    "height" to Json.JNum(grid.heightAt(layer, x, y)),
                 ))
           }
       root.entries["layer_$layer"] = Json.JArr(cells)

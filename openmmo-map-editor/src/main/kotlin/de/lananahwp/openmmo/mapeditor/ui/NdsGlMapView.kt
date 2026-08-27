@@ -76,7 +76,7 @@ class NdsGlMapView(
   override var activeTile = 0
   override var activeTileWidth = 1
   override var activeTileHeight = 1
-  override var activeHeight = 0
+  override var activeHeight = 0.0
   override var brushSize = 1
     set(value) {
       field = value.coerceAtLeast(1)
@@ -447,7 +447,7 @@ class NdsGlMapView(
           // visible on the open ground around a map as well as on the map itself.
           val ground = surface?.get(x)?.get(z)?.takeIf { !it.isNaN() } ?: 0.0
           val overlayLift = if (tile in customTileOverlays) NdsGrid.OVERLAY_LIFT else 0f
-          val base = ground + g.heightAt(layer, x, z).toDouble() + overlayLift
+          val base = ground + g.heightAt(layer, x, z) + overlayLift
           if (NdsTileset.isCustom(tile)) {
             customTileGeometry[tile]?.let { drawCustomTile(gl, xf, it, x, z, base) }
             continue

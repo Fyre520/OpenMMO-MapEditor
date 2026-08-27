@@ -420,7 +420,7 @@ interface Nds3DView {
   var activeTile: Int
   var activeTileWidth: Int
   var activeTileHeight: Int
-  var activeHeight: Int
+  var activeHeight: Double
   /** Width and depth, in map squares, of the paint cursor and one paint operation. */
   var brushSize: Int
   var brushCollision: Int

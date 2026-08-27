@@ -224,7 +224,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsTileCombo = JComboBox<String>()
   private val ndsActiveRomTilesOnly = JCheckBox("Load tiles from active ROM only", false)
   private val ndsLayerSpinner = JSpinner(SpinnerNumberModel(0, 0, NdsGrid.LAYERS - 1, 1))
-  private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0, -32, 32, 1))
+  private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0.0, -32.0, 32.0, 0.25))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
   /** Paint brush width in squares, for the four modes that write a square at a time. */
   private val ndsTileBrushSpinner = JSpinner(SpinnerNumberModel(1, 1, 32, 1))
@@ -639,9 +639,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsLayerSpinner.addChangeListener {
       view()?.activeLayer = (ndsLayerSpinner.value as Number).toInt()
     }
-    ndsHeightSpinner.preferredSize = Dimension(60, ndsHeightSpinner.preferredSize.height)
+    ndsHeightSpinner.editor = JSpinner.NumberEditor(ndsHeightSpinner, "0.####")
+    ndsHeightSpinner.preferredSize = Dimension(72, ndsHeightSpinner.preferredSize.height)
+    ndsHeightSpinner.toolTipText =
+        "Tile height in map-tile units; arrows change it by 0.25 and decimals may be typed"
     ndsHeightSpinner.addChangeListener {
-      view()?.activeHeight = (ndsHeightSpinner.value as Number).toInt()
+      view()?.activeHeight = (ndsHeightSpinner.value as Number).toDouble()
     }
     ndsTileBrushSpinner.preferredSize = Dimension(60, ndsTileBrushSpinner.preferredSize.height)
     ndsTileBrushSpinner.toolTipText =
@@ -3701,7 +3704,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (height) {
         ndsHistory.recordCell(NdsCellEdit(
             NdsCellKind.HEIGHT, layer, cx, cz,
-            map.grid.heightAt(layer, cx, cz), view.activeHeight.coerceIn(-32, 32)))
+            map.grid.heightAt(layer, cx, cz), view.activeHeight.coerceIn(-32.0, 32.0)))
         map.grid.setHeight(layer, cx, cz, view.activeHeight)
       } else {
         if (stamp != null &&
@@ -3767,7 +3770,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     for ((cx, cz) in ndsBrushCells(map.grid, x, z)) {
       if (height) {
         ndsHistory.recordCell(NdsCellEdit(
-            NdsCellKind.HEIGHT, layer, cx, cz, map.grid.heightAt(layer, cx, cz), 0))
+            NdsCellKind.HEIGHT, layer, cx, cz, map.grid.heightAt(layer, cx, cz), 0.0))
         map.grid.setHeight(layer, cx, cz, 0)
       } else {
         val targetLayer = if (selectedOverlay) {
@@ -3779,10 +3782,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         ndsHistory.recordCell(NdsCellEdit(
             NdsCellKind.TILE, targetLayer, cx, cz, map.grid.tileAt(targetLayer, cx, cz), -1))
         map.grid.setTile(targetLayer, cx, cz, -1)
-        if (selectedOverlay && targetLayer != layer && map.grid.heightAt(targetLayer, cx, cz) != 0) {
+        if (selectedOverlay && targetLayer != layer && map.grid.heightAt(targetLayer, cx, cz) != 0.0) {
           ndsHistory.recordCell(NdsCellEdit(
               NdsCellKind.HEIGHT, targetLayer, cx, cz,
-              map.grid.heightAt(targetLayer, cx, cz), 0))
+              map.grid.heightAt(targetLayer, cx, cz), 0.0))
           map.grid.setHeight(targetLayer, cx, cz, 0)
         }
       }
@@ -3809,9 +3812,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         ndsHistory.recordCell(NdsCellEdit(
             NdsCellKind.TILE, target, cx, cz, NdsGrassField.INTERIOR, -1))
         map.grid.setTile(target, cx, cz, -1)
-        if (target != activeLayer && map.grid.heightAt(target, cx, cz) != 0) {
+        if (target != activeLayer && map.grid.heightAt(target, cx, cz) != 0.0) {
           ndsHistory.recordCell(NdsCellEdit(
-              NdsCellKind.HEIGHT, target, cx, cz, map.grid.heightAt(target, cx, cz), 0))
+              NdsCellKind.HEIGHT, target, cx, cz, map.grid.heightAt(target, cx, cz), 0.0))
           map.grid.setHeight(target, cx, cz, 0)
         }
         changed++

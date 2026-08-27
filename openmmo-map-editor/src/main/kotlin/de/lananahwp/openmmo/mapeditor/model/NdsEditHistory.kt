@@ -9,9 +9,19 @@ data class NdsCellEdit(
     val layer: Int,
     val x: Int,
     val z: Int,
-    val before: Int,
-    val after: Int,
-)
+    val before: Double,
+    val after: Double,
+) {
+  /** Convenience for tile/collision/permission edits, whose values remain integral. */
+  constructor(
+      kind: NdsCellKind,
+      layer: Int,
+      x: Int,
+      z: Int,
+      before: Int,
+      after: Int,
+  ) : this(kind, layer, x, z, before.toDouble(), after.toDouble())
+}
 
 /**
  * One reversible change to a DS map.
@@ -188,12 +198,12 @@ class NdsEditHistory(private val limit: Int = DEFAULT_LIMIT) {
     dragStep = null
   }
 
-  private fun apply(map: NdsMap, edit: NdsCellEdit, value: Int) {
+  private fun apply(map: NdsMap, edit: NdsCellEdit, value: Double) {
     when (edit.kind) {
-      NdsCellKind.TILE -> map.grid.setTile(edit.layer, edit.x, edit.z, value)
+      NdsCellKind.TILE -> map.grid.setTile(edit.layer, edit.x, edit.z, value.toInt())
       NdsCellKind.HEIGHT -> map.grid.setHeight(edit.layer, edit.x, edit.z, value)
-      NdsCellKind.COLLISION -> map.grid.setCollision(edit.x, edit.z, value)
-      NdsCellKind.PERMISSION -> map.grid.setPermission(edit.x, edit.z, value)
+      NdsCellKind.COLLISION -> map.grid.setCollision(edit.x, edit.z, value.toInt())
+      NdsCellKind.PERMISSION -> map.grid.setPermission(edit.x, edit.z, value.toInt())
     }
   }
 

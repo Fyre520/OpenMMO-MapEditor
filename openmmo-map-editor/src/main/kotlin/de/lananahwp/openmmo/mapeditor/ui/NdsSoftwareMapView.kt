@@ -77,7 +77,7 @@ class NdsSoftwareMapView(
   override var activeTile = 0
   override var activeTileWidth = 1
   override var activeTileHeight = 1
-  override var activeHeight = 0
+  override var activeHeight = 0.0
   override var brushSize = 1
     set(value) {
       field = value.coerceAtLeast(1)
@@ -414,7 +414,7 @@ class NdsSoftwareMapView(
           val tile = grid.tileAt(layer, x, z)
           if (tile < 0) continue
           val def = NdsTileset.tiles.getOrNull(tile) ?: continue
-          val base = grid.heightAt(layer, x, z).toDouble()
+          val base = grid.heightAt(layer, x, z)
           when (def.shape) {
             de.lananahwp.openmmo.mapeditor.core.TileShape.FLAT -> {
               val p = gx(x.toDouble(), z.toDouble())

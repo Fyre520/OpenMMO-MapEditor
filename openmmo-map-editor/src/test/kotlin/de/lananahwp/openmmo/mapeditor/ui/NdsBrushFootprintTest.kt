@@ -49,8 +49,8 @@ class NdsBrushFootprintTest {
   fun `cursor height follows terrain tile elevation and tile shape`() {
     val grid = NdsGrid(4, 4)
     grid.setTile(0, 1, 2, NdsTileset.tiles.indexOfFirst { it.name == "Wall" })
-    grid.setHeight(0, 1, 2, 3)
-    assertEquals(11.0, ndsPaintCursorHeight(
+    grid.setHeight(0, 1, 2, 3.25)
+    assertEquals(11.25, ndsPaintCursorHeight(
         grid, 1, 2, 0, terrainHeight = 5.0, modelScale = 1f,
         customGeometry = emptyMap()))
   }
