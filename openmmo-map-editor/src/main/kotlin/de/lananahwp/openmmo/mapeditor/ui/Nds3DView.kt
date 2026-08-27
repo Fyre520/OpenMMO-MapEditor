@@ -37,7 +37,34 @@ data class NdsPointerHit(
     val surfaceTexture: String? = null,
     val shiftDown: Boolean = false,
     val ctrlDown: Boolean = false,
+    /** Pointer location retained for screen-space handle drags. */
+    val screenX: Int? = null,
+    val screenY: Int? = null,
+    /** Authored custom walk surface under the pointer, independent of the visible prop/model hit. */
+    val walkSurfaceId: String? = null,
+    /** Selected walk-surface handle under the pointer, if one is close enough on screen. */
+    val walkHandle: NdsWalkHandleRole? = null,
 )
+
+/** A selectable point rendered on an authored walk surface. */
+enum class NdsWalkHandleRole { CENTER, NORTH, EAST, SOUTH, WEST, ROTATE, SCALE }
+
+data class NdsWalkHandle(
+    val role: NdsWalkHandleRole,
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    /** ARGB display colour. */
+    val color: Int,
+)
+
+internal fun ndsWalkHandleGlyph(role: NdsWalkHandleRole): String = when (role) {
+  NdsWalkHandleRole.CENTER -> "✥"
+  NdsWalkHandleRole.NORTH, NdsWalkHandleRole.SOUTH -> "↕"
+  NdsWalkHandleRole.EAST, NdsWalkHandleRole.WEST -> "↔"
+  NdsWalkHandleRole.ROTATE -> "↻"
+  NdsWalkHandleRole.SCALE -> "⤢"
+}
 
 /**
  * The top of [triangles] over each grid square, in world units, or NaN where nothing covers it.
@@ -290,6 +317,29 @@ internal fun projectNdsPoint(
   return NdsScreenProjector(view)?.project(x, y, z)
 }
 
+/** Selects the closest visible walk handle inside a fixed screen-space radius. */
+internal fun pickNdsWalkHandleAtScreen(
+    handles: List<NdsWalkHandle>,
+    mouseX: Int,
+    mouseY: Int,
+    view: NdsScreenPickView,
+    radius: Double = 12.0,
+): NdsWalkHandleRole? {
+  var bestDistance = radius * radius
+  var best: NdsWalkHandleRole? = null
+  for (handle in handles) {
+    val point = projectNdsPoint(view, handle.x, handle.y, handle.z) ?: continue
+    val dx = point[0] - mouseX
+    val dy = point[1] - mouseY
+    val distance = dx * dx + dy * dy
+    if (distance <= bestDistance) {
+      bestDistance = distance
+      best = handle.role
+    }
+  }
+  return best
+}
+
 private class NdsScreenProjector private constructor(private val view: NdsScreenPickView) {
   private val eye: DoubleArray
   private val forward: DoubleArray
@@ -404,6 +454,8 @@ interface Nds3DView {
 
   /** Read-only ROM walk surfaces, drawn only when the user enables the BDHC debug overlay. */
   var walkSurfaceTriangles: List<NdsTri>
+  /** Selection/mutation handles displayed over one authored custom walk surface. */
+  var walkSurfaceHandles: List<NdsWalkHandle>
 
   /**
    * The geometry painted tiles rest on: the map's own terrain, without the props placed on it.
@@ -455,6 +507,8 @@ interface Nds3DView {
   var customTileGeometry: Map<Int, List<NdsTri>>
   /** Custom tile ids whose transparent geometry is drawn over an existing ground tile. */
   var customTileOverlays: Set<Int>
+  /** Projects one editor map-space point, used to turn mouse motion into a height delta. */
+  fun projectMapPoint(x: Float, y: Float, z: Float): DoubleArray?
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component

@@ -10,6 +10,8 @@ data class NdsMapCropImpact(
     val bgEventsRemoved: Int,
     val outputWidth: Int,
     val outputHeight: Int,
+    val walkSurfacesRemoved: Int = 0,
+    val walkSurfacesClipped: Int = 0,
 ) {
   val eventsRemoved: Int
     get() = objectsRemoved + warpsRemoved + triggersRemoved + bgEventsRemoved
@@ -37,6 +39,7 @@ object NdsMapCropper {
       else if (intersection.first != trigger.w.coerceAtLeast(1) ||
           intersection.second != trigger.h.coerceAtLeast(1)) clippedTriggers++
     }
+    val walkSurfaceIntersections = map.walkSurfaces.map { it to walkSurfaceIntersection(it, bounds) }
     return NdsMapCropImpact(
         propsRemoved = map.props.count { !pointInside(it.x, it.z) },
         objectsRemoved = map.events.objects.count { !pointInside(it.x, it.z) },
@@ -46,6 +49,12 @@ object NdsMapCropper {
         bgEventsRemoved = map.events.bgEvents.count { !pointInside(it.x, it.z) },
         outputWidth = bounds.outputWidth,
         outputHeight = bounds.outputHeight,
+        walkSurfacesRemoved = walkSurfaceIntersections.count { it.second == null },
+        walkSurfacesClipped = walkSurfaceIntersections.count { (surface, intersection) ->
+          intersection != null &&
+              (intersection.left != surface.minX || intersection.top != surface.minZ ||
+                  intersection.right != surface.maxX || intersection.bottom != surface.maxZ)
+        },
     )
   }
 
@@ -63,6 +72,7 @@ object NdsMapCropper {
     val impact = impact(map, startX, startZ, width, height)
     val bounds = validate(map, startX, startZ, width, height)
     val oldGrid = map.grid
+    val croppedWalkSurfaces = map.walkSurfaces.mapNotNull { clipWalkSurface(it, bounds) }
     val newGrid = NdsGrid(bounds.outputWidth, bounds.outputHeight)
     for (layer in 0 until NdsGrid.LAYERS) {
       for (x in 0 until bounds.width) for (z in 0 until bounds.height) {
@@ -79,6 +89,8 @@ object NdsMapCropper {
       newGrid.setPermission(x, z, oldGrid.permissionAt(oldX, oldZ))
     }
     map.grid = newGrid
+    map.walkSurfaces.clear()
+    map.walkSurfaces += croppedWalkSurfaces
 
     fun pointInside(x: Number, z: Number): Boolean =
         x.toDouble() >= bounds.left && x.toDouble() < bounds.right &&
@@ -209,5 +221,37 @@ object NdsMapCropper {
     val bottom = minOf(trigger.z + trigger.h.coerceAtLeast(1), bounds.bottom)
     if (left >= right || top >= bottom) return null
     return (right - left) to (bottom - top)
+  }
+
+  private data class SurfaceBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
+
+  private fun walkSurfaceIntersection(
+      surface: NdsWalkSurface,
+      bounds: TileBounds,
+  ): SurfaceBounds? {
+    val left = maxOf(surface.minX, bounds.left)
+    val top = maxOf(surface.minZ, bounds.top)
+    val right = minOf(surface.maxX, bounds.right)
+    val bottom = minOf(surface.maxZ, bounds.bottom)
+    return if (left < right && top < bottom) SurfaceBounds(left, top, right, bottom) else null
+  }
+
+  /** Clips a plane without flattening its remaining portion, then moves it into cropped space. */
+  private fun clipWalkSurface(surface: NdsWalkSurface, bounds: TileBounds): NdsWalkSurface? {
+    val kept = walkSurfaceIntersection(surface, bounds) ?: return null
+    fun height(x: Int, z: Int) = surface.heightAt(x.toDouble(), z.toDouble())
+    return surface.copy(
+        minX = kept.left - bounds.left,
+        minZ = kept.top - bounds.top,
+        maxX = kept.right - bounds.left,
+        maxZ = kept.bottom - bounds.top,
+    ).also {
+      it.setCornerHeights(
+          height(kept.left, kept.top),
+          height(kept.right, kept.top),
+          height(kept.right, kept.bottom),
+          height(kept.left, kept.bottom),
+      )
+    }
   }
 }

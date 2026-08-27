@@ -20,6 +20,8 @@ import de.lananahwp.openmmo.mapeditor.model.NdsTerrainRemoval
 import de.lananahwp.openmmo.mapeditor.model.NdsTerrainTransform
 import de.lananahwp.openmmo.mapeditor.model.NdsTrigger
 import de.lananahwp.openmmo.mapeditor.model.NdsWarp
+import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurface
+import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurfaceDirection
 import java.io.File
 import java.awt.Color
 import kotlin.math.floor
@@ -397,6 +399,95 @@ class NdsProject(
     private fun footprintArea(tri: de.lananahwp.openmmo.mapeditor.core.NdsTri): Float =
         kotlin.math.abs(
             (tri.bx - tri.ax) * (tri.cz - tri.az) - (tri.cx - tri.ax) * (tri.bz - tri.az)) / 2f
+
+    /**
+     * Fits one conservative cardinal walk plane to transformed stair-like prop geometry.
+     *
+     * The highest non-vertical face at each covered tile centre becomes a sample. A prop is
+     * accepted only when those samples have a clear monotonic height progression along one axis;
+     * flat buildings and irregular scenery are rejected instead of receiving invented slopes.
+     */
+    internal fun fitWalkSurfaceToTriangles(
+        triangles: List<NdsTri>,
+        grid: NdsGrid,
+        id: String,
+    ): NdsWalkSurface? {
+      if (triangles.isEmpty()) return null
+      val rawMinX = triangles.minOf { minOf(it.ax, it.bx, it.cx) }
+      val rawMaxX = triangles.maxOf { maxOf(it.ax, it.bx, it.cx) }
+      val rawMinZ = triangles.minOf { minOf(it.az, it.bz, it.cz) }
+      val rawMaxZ = triangles.maxOf { maxOf(it.az, it.bz, it.cz) }
+      val firstX = kotlin.math.floor(rawMinX.toDouble() + 1e-4).toInt().coerceAtLeast(0)
+      val lastX = (kotlin.math.ceil(rawMaxX.toDouble() - 1e-4).toInt() - 1)
+          .coerceAtMost(grid.cols - 1)
+      val firstZ = kotlin.math.floor(rawMinZ.toDouble() + 1e-4).toInt().coerceAtLeast(0)
+      val lastZ = (kotlin.math.ceil(rawMaxZ.toDouble() - 1e-4).toInt() - 1)
+          .coerceAtMost(grid.rows - 1)
+      if (firstX > lastX || firstZ > lastZ) return null
+
+      data class HeightSample(val cellX: Int, val cellZ: Int, val y: Double)
+      val samples = mutableListOf<HeightSample>()
+      for (x in firstX..lastX) for (z in firstZ..lastZ) {
+        val px = x + 0.5f
+        val pz = z + 0.5f
+        val y = triangles.asSequence()
+            .filter { footprintArea(it) > 1e-5f }
+            .mapNotNull { samplePlane(it, px, pz)?.takeIf { sample -> sample.inside }?.y }
+            .maxOrNull() ?: continue
+        samples += HeightSample(x, z, y.toDouble())
+      }
+      if (samples.size < 2) return null
+      val minX = samples.minOf { it.cellX }
+      val maxX = samples.maxOf { it.cellX } + 1
+      val minZ = samples.minOf { it.cellZ }
+      val maxZ = samples.maxOf { it.cellZ } + 1
+      val footprintCells = (maxX - minX) * (maxZ - minZ)
+      if (samples.size * 2 < footprintCells) return null
+
+      val meanY = samples.map { it.y }.average()
+      val varianceY = samples.sumOf { (it.y - meanY) * (it.y - meanY) }
+      if (varianceY < 1e-8) return null
+      data class AxisFit(val xAxis: Boolean, val covariance: Double, val variance: Double, val score: Double)
+      fun fit(xAxis: Boolean): AxisFit {
+        val coordinates = samples.map { if (xAxis) it.cellX + 0.5 else it.cellZ + 0.5 }
+        val mean = coordinates.average()
+        val covariance = samples.indices.sumOf { (coordinates[it] - mean) * (samples[it].y - meanY) }
+        val variance = coordinates.sumOf { (it - mean) * (it - mean) }
+        val span = if (xAxis) maxX - minX else maxZ - minZ
+        val score = if (variance < 1e-8) 0.0 else kotlin.math.abs(covariance / variance) * span
+        return AxisFit(xAxis, covariance, variance, score)
+      }
+      val axis = listOf(fit(true), fit(false)).maxBy { it.score }
+      if (axis.variance < 1e-8 || axis.score < 0.20) return null
+      val correlation = kotlin.math.abs(axis.covariance) /
+          kotlin.math.sqrt(axis.variance * varianceY)
+      if (!correlation.isFinite() || correlation < 0.65) return null
+
+      val minimumCoordinate = if (axis.xAxis) minX else minZ
+      val maximumCoordinate = (if (axis.xAxis) maxX else maxZ) - 1
+      fun median(values: List<Double>): Double {
+        val sorted = values.sorted()
+        val middle = sorted.size / 2
+        return if (sorted.size % 2 == 1) sorted[middle]
+        else (sorted[middle - 1] + sorted[middle]) / 2.0
+      }
+      val atMinimum = median(samples.filter {
+        (if (axis.xAxis) it.cellX else it.cellZ) == minimumCoordinate
+      }.map { it.y })
+      val atMaximum = median(samples.filter {
+        (if (axis.xAxis) it.cellX else it.cellZ) == maximumCoordinate
+      }.map { it.y })
+      val low = minOf(atMinimum, atMaximum)
+      val high = maxOf(atMinimum, atMaximum)
+      if (high - low < 0.20) return null
+      val direction = when {
+        axis.xAxis && atMaximum > atMinimum -> NdsWalkSurfaceDirection.EAST
+        axis.xAxis -> NdsWalkSurfaceDirection.WEST
+        atMaximum > atMinimum -> NdsWalkSurfaceDirection.SOUTH
+        else -> NdsWalkSurfaceDirection.NORTH
+      }
+      return NdsWalkSurface.cardinal(id, minX, minZ, maxX, maxZ, low, high, direction)
+    }
 
     /**
      * Rebuilds one map square as a single flat quad — two triangles spanning the square exactly.
@@ -1220,7 +1311,8 @@ class NdsProject(
    * so showing it cannot change tile resting height, surface picking, collision or permissions.
    */
   fun bdhcTrianglesFor(map: NdsMap): List<NdsTri> {
-    if (map.isCustom || importedModelFile(map.name).isFile) return emptyList()
+    if (map.isCustom) return customWalkSurfaceTriangles(map)
+    if (importedModelFile(map.name).isFile) return emptyList()
     val cells = resolveCells(map)
     if (cells.isEmpty()) return emptyList()
     val (minCellX, minCellY, _, _) = footprint(cells)
@@ -1266,15 +1358,57 @@ class NdsProject(
     return out
   }
 
+  /** Custom authored planes in editor coordinates, kept separate from visible terrain. */
+  private fun customWalkSurfaceTriangles(map: NdsMap): List<NdsTri> =
+      customWalkSurfaceTriangles(map, map.walkSurfaces)
+
+  /** Overlay geometry for a transient paint preview that has not been added to the map yet. */
+  fun walkSurfacePreviewTriangles(map: NdsMap, surface: NdsWalkSurface): List<NdsTri> =
+      if (map.isCustom) customWalkSurfaceTriangles(map, listOf(surface)) else emptyList()
+
+  private fun customWalkSurfaceTriangles(
+      map: NdsMap,
+      surfaces: List<NdsWalkSurface>,
+  ): List<NdsTri> {
+    val color = 0xFF36D6E7.toInt()
+    return surfaces.filter { it.isValidFor(map.grid) }.flatMap { surface ->
+      val x0 = surface.minX.toFloat()
+      val z0 = surface.minZ.toFloat()
+      val x1 = surface.maxX.toFloat()
+      val z1 = surface.maxZ.toFloat()
+      val y00 = surface.heightAt(surface.minX.toDouble(), surface.minZ.toDouble()).toFloat()
+      val y10 = surface.heightAt(surface.maxX.toDouble(), surface.minZ.toDouble()).toFloat()
+      val y11 = surface.heightAt(surface.maxX.toDouble(), surface.maxZ.toDouble()).toFloat()
+      val y01 = surface.heightAt(surface.minX.toDouble(), surface.maxZ.toDouble()).toFloat()
+      val group = "custom-bdhc:${surface.id}"
+      listOf(
+          NdsTri(
+              x0, y00, z0, x1, y10, z0, x1, y11, z1, color,
+              0f, 0f, 0f, 0f, 0f, 0f, editGroup = group),
+          NdsTri(
+              x0, y00, z0, x1, y11, z1, x0, y01, z1, color,
+              0f, 0f, 0f, 0f, 0f, 0f, editGroup = group),
+      )
+    }
+  }
+
   /**
-   * Queries the source ROM's walkable height at editor map coordinates [x], [z].
+   * Queries the walkable height at editor map coordinates [x], [z].
    *
    * The returned value uses editor tile-height units. Overlapping floors follow the ROM rule and
-   * choose the candidate nearest [currentY]. Custom maps and imported replacement models have no
-   * implicit ROM BDHC, because pairing old collision planes with new geometry would be unsafe.
+   * choose the candidate nearest [currentY]. Custom maps query their explicitly authored planes.
+   * Imported replacements of ROM terrain have no implicit BDHC, because pairing old collision
+   * planes with new geometry would be unsafe.
    */
   fun bdhcHeightAt(map: NdsMap, currentY: Double, x: Double, z: Double): Double? {
-    if (map.isCustom || importedModelFile(map.name).isFile) return null
+    if (map.isCustom) {
+      return map.walkSurfaces.asSequence()
+          .filter { it.isValidFor(map.grid) && it.contains(x, z) }
+          .take(10)
+          .map { it.heightAt(x, z) }
+          .minByOrNull { kotlin.math.abs(currentY - it) }
+    }
+    if (importedModelFile(map.name).isFile) return null
     val cells = resolveCells(map)
     if (cells.isEmpty()) return null
     val (minCellX, minCellY, _, _) = footprint(cells)
@@ -1698,6 +1832,17 @@ class NdsProject(
    */
   fun buildingTrianglesFor(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
     return editablePropTriangles(map)
+  }
+
+  /** Builds a custom walk slope from the selected prop when its mesh is clearly stair-like. */
+  fun walkSurfaceFromProp(map: NdsMap, propId: String): NdsWalkSurface? {
+    if (!map.isCustom || map.props.none { it.id == propId }) return null
+    val triangles = editablePropTriangles(map).filter { it.editGroup == "prop:$propId" }
+    return fitWalkSurfaceToTriangles(
+        triangles,
+        map.grid,
+        "walk-${java.util.UUID.randomUUID()}",
+    )
   }
 
   /** Built-in Tile-mode paint, baked into the same map-space geometry as the ROM terrain. */
@@ -2670,6 +2815,10 @@ class NdsProject(
     root.arr("matrixCells")?.items?.forEach { item ->
       item.asObj()?.let { cell -> map.matrixCells += (cell.int("x") ?: 0) to (cell.int("y") ?: 0) }
     }
+    root.arr("walkSurfaces")?.items?.forEach { item ->
+      val surface = item.asObj()?.let(::walkSurfaceFromJson) ?: return@forEach
+      if (surface.isValidFor(map.grid)) map.walkSurfaces += surface
+    }
     loadGridOverride(map)
     loadProps(map)
     return map
@@ -2905,7 +3054,7 @@ class NdsProject(
 
   private fun renderCustomManifest(map: NdsMap): String {
     val root = Json.JObj(linkedMapOf(
-        "version" to Json.JNum(1.0),
+        "version" to Json.JNum(3.0),
         "name" to Json.JStr(map.name),
         "displayName" to Json.JStr(map.displayName),
         "mapId" to Json.JNum(map.mapId.toDouble()),
@@ -2914,9 +3063,39 @@ class NdsProject(
         "matrixCells" to Json.JArr(map.matrixCells.map { (x, y) ->
           Json.JObj(linkedMapOf("x" to Json.JNum(x.toDouble()), "y" to Json.JNum(y.toDouble())))
         }),
+        "walkSurfaces" to Json.JArr(map.walkSurfaces.map(::walkSurfaceToJson)),
         "header" to headerToJson(map.header),
     ))
     return JsonWriter.writePretty(root)
+  }
+
+  private fun walkSurfaceFromJson(o: Json.JObj): NdsWalkSurface? {
+    return NdsWalkSurface(
+        id = o.str("id") ?: return null,
+        minX = o.int("minX") ?: return null,
+        minZ = o.int("minZ") ?: return null,
+        maxX = o.int("maxX") ?: return null,
+        maxZ = o.int("maxZ") ?: return null,
+        northWestHeight = o.double("northWestHeight") ?: return null,
+        northEastHeight = o.double("northEastHeight") ?: return null,
+        southEastHeight = o.double("southEastHeight") ?: return null,
+        southWestHeight = o.double("southWestHeight") ?: return null,
+    )
+  }
+
+  private fun walkSurfaceToJson(surface: NdsWalkSurface): Json.JObj {
+    val fields = linkedMapOf<String, Json>(
+        "id" to Json.JStr(surface.id),
+        "minX" to Json.JNum(surface.minX.toDouble()),
+        "minZ" to Json.JNum(surface.minZ.toDouble()),
+        "maxX" to Json.JNum(surface.maxX.toDouble()),
+        "maxZ" to Json.JNum(surface.maxZ.toDouble()),
+        "northWestHeight" to Json.JNum(surface.northWestHeight),
+        "northEastHeight" to Json.JNum(surface.northEastHeight),
+        "southEastHeight" to Json.JNum(surface.southEastHeight),
+        "southWestHeight" to Json.JNum(surface.southWestHeight),
+    )
+    return Json.JObj(fields)
   }
 
   private fun headerToJson(h: NdsMapHeader): Json.JObj = Json.JObj(linkedMapOf(

@@ -107,6 +107,26 @@ class NdsMapCropperTest {
     assertEquals(listOf(10 to 20, 11 to 20, 10 to 21, 11 to 21), map.matrixCells)
   }
 
+  @Test
+  fun `crop clips and translates walk surfaces without flattening their slope`() {
+    val map = customMap(2, 2)
+    map.walkSurfaces += NdsWalkSurface.cardinal(
+        "kept", 30, 34, 40, 38, 0.0, 10.0, NdsWalkSurfaceDirection.EAST)
+    map.walkSurfaces += NdsWalkSurface.cardinal(
+        "cut", 0, 0, 4, 4, 0.0, 0.0, NdsWalkSurfaceDirection.FLAT)
+
+    val impact = NdsMapCropper.crop(map, startX = 32, startZ = 32, width = 32, height = 32)
+
+    assertEquals(1, impact.walkSurfacesRemoved)
+    assertEquals(1, impact.walkSurfacesClipped)
+    val kept = map.walkSurfaces.single()
+    assertEquals(listOf(0, 2, 8, 6), listOf(kept.minX, kept.minZ, kept.maxX, kept.maxZ))
+    assertEquals(2.0, kept.lowHeight)
+    assertEquals(10.0, kept.highHeight)
+    assertEquals(2.0, kept.heightAt(0.0, 2.0))
+    assertEquals(10.0, kept.heightAt(8.0, 2.0))
+  }
+
   private fun customMap(cellsWide: Int, cellsHigh: Int) = NdsMap(
       name = "MAP_TEST",
       mapId = 900,

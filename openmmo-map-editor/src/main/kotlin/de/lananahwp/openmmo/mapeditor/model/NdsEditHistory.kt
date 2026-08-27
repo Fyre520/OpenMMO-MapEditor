@@ -28,7 +28,7 @@ data class NdsCellEdit(
  *
  * Painting is recorded square by square, because a stroke can cover hundreds of them and holding
  * the whole grid twice over per click would be wasteful. Prop and scenery work is recorded as a
- * before/after snapshot instead: those operations add, move and drop entries across three lists
+ * before/after snapshot instead: those operations add, move and drop entries across short lists
  * at once, and the lists are short, so copying them is both simpler and safer than trying to
  * describe the edit.
  */
@@ -51,7 +51,7 @@ class NdsSceneStep(
 ) : NdsUndoStep()
 
 /**
- * A copy of everything placed on a DS map: props, hidden scenery, moved scenery, and collision.
+ * A copy of everything placed on a DS map: props, scenery, custom walk surfaces, and collision.
  *
  * Collision rides along because removing scenery can clear the collision underneath it, and
  * putting that scenery back has to put those values back too.
@@ -60,12 +60,14 @@ class NdsSceneSnapshot(
     val props: List<NdsProp>,
     val removals: List<NdsTerrainRemoval>,
     val transforms: List<NdsTerrainTransform>,
+    val walkSurfaces: List<NdsWalkSurface>,
     val collision: Array<IntArray>,
 ) {
   fun sameAs(other: NdsSceneSnapshot): Boolean =
       props == other.props &&
           removals == other.removals &&
           transforms == other.transforms &&
+          walkSurfaces == other.walkSurfaces &&
           collision.size == other.collision.size &&
           collision.indices.all { collision[it].contentEquals(other.collision[it]) }
 
@@ -77,6 +79,7 @@ class NdsSceneSnapshot(
           it.copy(clearedCollision = it.clearedCollision.toMutableList())
         },
         transforms = map.terrainTransforms.map { it.copy() },
+        walkSurfaces = map.walkSurfaces.map { it.copy() },
         collision = Array(map.grid.cols) { x -> map.grid.collisions[x].copyOf() },
     )
   }
@@ -217,6 +220,8 @@ class NdsEditHistory(private val limit: Int = DEFAULT_LIMIT) {
     }
     map.terrainTransforms.clear()
     map.terrainTransforms += snapshot.transforms.map { it.copy() }
+    map.walkSurfaces.clear()
+    map.walkSurfaces += snapshot.walkSurfaces.map { it.copy() }
     for (x in 0 until map.grid.cols) {
       snapshot.collision.getOrNull(x)?.copyInto(map.grid.collisions[x])
     }

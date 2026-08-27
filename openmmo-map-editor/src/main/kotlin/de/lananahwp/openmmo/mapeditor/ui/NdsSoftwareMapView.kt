@@ -7,6 +7,7 @@ import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Cursor
 import java.awt.Dimension
+import java.awt.Font
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
@@ -44,9 +45,11 @@ class NdsSoftwareMapView(
     private val onStrokeBegin: () -> Unit = {},
     /** Reports the map square under the pointer, or null when the pointer leaves the map. */
     private val onHoverCell: (Pair<Int, Int>?) -> Unit = {},
+    /** Reports the final pointer position after a left-button interaction ends. */
+    private val onCellInteractionEnd: (hit: NdsPointerHit?) -> Unit = {},
 ) : JPanel(), Nds3DView {
 
-  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
+  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, WALK_SURFACE, NONE }
 
   override fun setPaintMode(mode: Int) {
     paintMode =
@@ -55,6 +58,7 @@ class NdsSoftwareMapView(
           1 -> PaintMode.COLLISION
           2 -> PaintMode.PERMISSION
           3 -> PaintMode.ELEVATION
+          8 -> PaintMode.WALK_SURFACE
           else -> PaintMode.NONE
         }
   }
@@ -107,7 +111,16 @@ class NdsSoftwareMapView(
 
   private var walkSurfaceOutline: List<FloatArray> = emptyList()
 
+  override var walkSurfaceHandles: List<NdsWalkHandle> = emptyList()
+    set(value) {
+      field = value
+      repaint()
+    }
+
   override var surfacePicking: Boolean = false
+
+  override fun projectMapPoint(x: Float, y: Float, z: Float): DoubleArray? =
+      screenPickView()?.let { projectNdsPoint(it, x, y, z) }
 
   override var customTileGeometry: Map<Int, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>> = emptyMap()
     set(value) {
@@ -218,6 +231,13 @@ class NdsSoftwareMapView(
           }
 
           override fun mouseReleased(e: MouseEvent) {
+            if (e.button == MouseEvent.BUTTON1) {
+              onCellInteractionEnd(
+                  pointerHit(e.x, e.y, includeModelGroup = true)?.copy(
+                      shiftDown = e.isShiftDown,
+                      ctrlDown = e.isControlDown,
+                  ))
+            }
             cursor = Cursor.getDefaultCursor()
           }
 
@@ -288,6 +308,7 @@ class NdsSoftwareMapView(
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
       PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.WALK_SURFACE -> Unit
       PaintMode.NONE -> Unit
     }
   }
@@ -465,14 +486,17 @@ class NdsSoftwareMapView(
   /** Draws the paint footprint last so textured terrain cannot cover it. */
   private fun drawBrushCursor(g2: Graphics2D, cam: Camera, grid: NdsGrid, m: ModelXform?) {
     if (paintMode == PaintMode.NONE) return
+    if (paintMode == PaintMode.WALK_SURFACE && walkSurfaceHandles.isNotEmpty()) return
     val (hx, hz) = hoverCell ?: return
     val surface = m?.let {
       ndsTileSurfaceHeights(surfaceTriangles, grid.cols, grid.rows, it.groundY, it.scale)
     }
     val faces = ArrayList<Face>()
-    val color = Color(255, 230, 46, if (paintMode == PaintMode.ELEVATION) 200 else 90)
+    val color = if (paintMode == PaintMode.WALK_SURFACE) Color(38, 224, 245, 140)
+        else Color(255, 230, 46, if (paintMode == PaintMode.ELEVATION) 200 else 90)
     for ((cx, cz) in ndsTileStampFootprint(
-        hx, hz, brushSize, activeTileWidth, activeTileHeight, grid.cols, grid.rows)) {
+        hx, hz, if (paintMode == PaintMode.WALK_SURFACE) 1 else brushSize,
+        activeTileWidth, activeTileHeight, grid.cols, grid.rows)) {
       val terrain = surface?.get(cx)?.get(cz)?.takeIf { !it.isNaN() } ?: 0.0
       val top = ndsPaintCursorHeight(
           grid, cx, cz, activeLayer, terrain, m?.scale ?: 1f, customTileGeometry) + 0.08
@@ -540,6 +564,30 @@ class NdsSoftwareMapView(
       val b = project(viewCoords(cam, xform(edge[3], edge[4], edge[5], m))) ?: continue
       g2.drawLine(a[0].toInt(), a[1].toInt(), b[0].toInt(), b[1].toInt())
     }
+    val oldStroke = g2.stroke
+    val oldFont = g2.font
+    g2.stroke = BasicStroke(2f)
+    g2.font = Font("Dialog", Font.BOLD, 14)
+    for (handle in walkSurfaceHandles) {
+      val point = project(viewCoords(cam, xform(handle.x, handle.y, handle.z, m))) ?: continue
+      val x = point[0].toInt()
+      val y = point[1].toInt()
+      g2.color = Color(10, 15, 20, 245)
+      g2.fillOval(x - 8, y - 8, 16, 16)
+      g2.color = Color(handle.color, true)
+      g2.fillOval(x - 7, y - 7, 14, 14)
+      g2.color = Color.WHITE
+      g2.drawOval(x - 7, y - 7, 14, 14)
+      val glyph = ndsWalkHandleGlyph(handle.role)
+      val metrics = g2.fontMetrics
+      g2.drawString(
+          glyph,
+          x - metrics.stringWidth(glyph) / 2,
+          y + (metrics.ascent - metrics.descent) / 2,
+      )
+    }
+    g2.stroke = oldStroke
+    g2.font = oldFont
   }
 
   private class ModelXform(val scale: Float, val cx: Float, val cz: Float, val groundY: Float)
@@ -547,7 +595,8 @@ class NdsSoftwareMapView(
   /** Computes the scale/offset that fits the model + grid footprint into the view. */
   private fun modelXform(): ModelXform? {
     val tris = modelTriangles
-    if (tris.isEmpty()) return null
+    val g = grid
+    if (tris.isEmpty() && g == null) return null
     var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
     var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
     var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
@@ -556,15 +605,17 @@ class NdsSoftwareMapView(
       for (v in floatArrayOf(tri.ay, tri.by, tri.cy)) { if (v < minY) minY = v; if (v > maxY) maxY = v }
       for (v in floatArrayOf(tri.az, tri.bz, tri.cz)) { if (v < minZ) minZ = v; if (v > maxZ) maxZ = v }
     }
-    val g = grid
     val fpX = g?.cols?.toFloat() ?: 0f
     val fpZ = g?.rows?.toFloat() ?: 0f
-    val spanX = maxOf((maxX - minX).coerceAtLeast(1e-3f), fpX.coerceAtLeast(1e-3f))
-    val spanZ = maxOf((maxZ - minZ).coerceAtLeast(1e-3f), fpZ.coerceAtLeast(1e-3f))
+    val modelSpanX = if (tris.isEmpty()) 0f else maxX - minX
+    val modelSpanZ = if (tris.isEmpty()) 0f else maxZ - minZ
+    val spanX = maxOf(modelSpanX.coerceAtLeast(1e-3f), fpX.coerceAtLeast(1e-3f))
+    val spanZ = maxOf(modelSpanZ.coerceAtLeast(1e-3f), fpZ.coerceAtLeast(1e-3f))
     val scale = (30.0 / maxOf(spanX, spanZ)).toFloat()
     val cx = if (fpX > 0f) fpX / 2f else (minX + maxX) / 2f
     val cz = if (fpZ > 0f) fpZ / 2f else (minZ + maxZ) / 2f
-    return ModelXform(scale, cx, cz, minY)
+    // A grid defines editor height 0. Props must not redefine that origin merely by existing.
+    return ModelXform(scale, cx, cz, if (g != null) 0f else minY)
   }
 
   private fun xform(x: Float, y: Float, z: Float, m: ModelXform): DoubleArray =
@@ -880,20 +931,45 @@ class NdsSoftwareMapView(
     val ground = pickRay(mx, my)?.let(::groundPoint)
     val cell = ground?.let(::groundCell)
     val group = if (includeModelGroup) screenModelGroup(mx, my) else null
-    if (ground == null && group == null) return null
-    return NdsPointerHit(cell?.first, cell?.second, group, ground?.first, ground?.second)
+    val walkSurfaceId = if (includeModelGroup && paintMode == PaintMode.WALK_SURFACE) {
+      screenWalkSurface(mx, my)
+    } else null
+    val walkHandle = if (includeModelGroup && paintMode == PaintMode.WALK_SURFACE) {
+      screenWalkHandle(mx, my)
+    } else null
+    if (ground == null && group == null && walkSurfaceId == null && walkHandle == null) return null
+    return NdsPointerHit(
+        cell?.first, cell?.second, group, ground?.first, ground?.second,
+        screenX = mx, screenY = my, walkSurfaceId = walkSurfaceId, walkHandle = walkHandle)
+  }
+
+  private fun screenPickView(): NdsScreenPickView? {
+    val transform = modelXform() ?: return null
+    return NdsScreenPickView(
+        width, height, yaw, pitch, distance, centerX, centerZ,
+        transform.scale, transform.cx, transform.cz, transform.groundY,
+    )
+  }
+
+  private fun screenWalkSurface(mx: Int, my: Int): String? {
+    val pickView = screenPickView() ?: return null
+    return pickNdsModelGroupAtScreen(walkSurfaceTriangles, mx, my, pickView)
+        ?.removePrefix("custom-bdhc:")
+        ?.takeUnless { it == "__walk-preview__" }
+  }
+
+  private fun screenWalkHandle(mx: Int, my: Int): NdsWalkHandleRole? {
+    val pickView = screenPickView() ?: return null
+    return pickNdsWalkHandleAtScreen(walkSurfaceHandles, mx, my, pickView)
   }
 
   private fun screenModelGroup(mx: Int, my: Int): String? {
-    val transform = modelXform() ?: return null
+    val pickView = screenPickView() ?: return null
     return pickNdsModelGroupAtScreen(
         modelTriangles,
         mx,
         my,
-        NdsScreenPickView(
-            width, height, yaw, pitch, distance, centerX, centerZ,
-            transform.scale, transform.cx, transform.cz, transform.groundY,
-        ),
+        pickView,
     )
   }
 

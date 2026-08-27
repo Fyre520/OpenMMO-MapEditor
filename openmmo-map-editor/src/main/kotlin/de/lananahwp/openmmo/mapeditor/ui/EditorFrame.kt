@@ -21,6 +21,8 @@ import de.lananahwp.openmmo.mapeditor.model.NdsProp
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneSnapshot
 import de.lananahwp.openmmo.mapeditor.model.NdsSceneStep
 import de.lananahwp.openmmo.mapeditor.model.NdsUndoStep
+import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurface
+import de.lananahwp.openmmo.mapeditor.model.NdsWalkSurfaceDirection
 import de.lananahwp.openmmo.mapeditor.project.DecompProject
 import de.lananahwp.openmmo.mapeditor.project.NdsExporter
 import de.lananahwp.openmmo.mapeditor.project.NdsProject
@@ -47,6 +49,7 @@ import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JComboBox
+import javax.swing.JDialog
 import javax.swing.JFileChooser
 import javax.swing.JFrame
 import javax.swing.JLabel
@@ -126,6 +129,8 @@ private enum class EditMode {
   FILL,
 }
 
+private enum class NdsWalkTransformKind { MOVE, MOVE_HEIGHT, RESIZE, ROTATE, SCALE, EDGE_HEIGHT }
+
 private data class TileEdit(val x: Int, val y: Int, val before: Int, val after: Int)
 
 private data class CopiedEvent(val type: MapEventType, val event: Json.JObj)
@@ -203,6 +208,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val zoomLabel = JLabel("100%")
   private val status = JLabel("Open a decomp (File -> Open Decomp)")
   private val ndsCursorCoordinates = JLabel("Cursor: X —, Z —")
+  private var ndsCursorCell: Pair<Int, Int>? = null
 
   private val metatileContainer = JPanel(BorderLayout())
   private val headerContainer = JPanel(BorderLayout())
@@ -245,10 +251,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           "Remove Scenery Object",
           "Pick Surface -> Prop",
           "Grass Field",
+          "Walk Surface",
       ))
   private val ndsGridCheck = JCheckBox("Grid")
   private val ndsCollisionCheck = JCheckBox("Collisions")
   private val ndsWalkSurfaceCheck = JCheckBox("Show walk surfaces")
+  private val ndsWalkToolLabel = JLabel("Walk tool:")
+  private val ndsWalkTool = JComboBox(arrayOf("Flat", "Slope: drag low to high", "From prop"))
+  private val ndsWalkHighLabel = JLabel("High:")
+  private val ndsWalkHighSpinner = JSpinner(SpinnerNumberModel(1.0, -32.0, 32.0, 0.25))
   private val ndsClearCollisionWithTerrain = JCheckBox("Clear collision with object", true)
   private val ndsCollisionEditView = JCheckBox("Transparent collision view")
   private val ndsShowOnlyTiles = JCheckBox("Show only tiles")
@@ -279,6 +290,22 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var refreshingNdsTileCombo = false
   private val ndsSurfaceClearButton = JButton("Clear selection")
   private val ndsSurfaceCells = LinkedHashSet<Long>()
+
+  private var ndsWalkPaintStart: Pair<Int, Int>? = null
+  private var ndsWalkPaintCurrent: Pair<Int, Int>? = null
+  private var ndsWalkPaintBefore: NdsSceneSnapshot? = null
+  private var ndsWalkPaintErasing = false
+  private var ndsWalkPreview: NdsWalkSurface? = null
+  private var selectedNdsWalkSurfaceId: String? = null
+  private var ndsWalkTransformKind: NdsWalkTransformKind? = null
+  private var ndsWalkTransformBefore: NdsSceneSnapshot? = null
+  private var ndsWalkTransformOriginal: NdsWalkSurface? = null
+  private var ndsWalkTransformStartCell: Pair<Int, Int>? = null
+  private var ndsWalkTransformStartGround: Pair<Float, Float>? = null
+  private var ndsWalkTransformStartScreen: Pair<Int, Int>? = null
+  private var ndsWalkTransformScreenAxis: Pair<Double, Double>? = null
+  private var ndsWalkTransformEdge: NdsWalkSurfaceDirection? = null
+  private var ndsWalkTransformCenterScreen: Pair<Double, Double>? = null
 
   /**
    * The mesh height the pointer met when each square was picked.
@@ -646,6 +673,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         "Tile height in map-tile units; arrows change it by 0.25 and decimals may be typed"
     ndsHeightSpinner.addChangeListener {
       view()?.activeHeight = (ndsHeightSpinner.value as Number).toDouble()
+      if (ndsPaintMode.selectedIndex == 8) refreshNdsWalkPaintPreview()
     }
     ndsTileBrushSpinner.preferredSize = Dimension(60, ndsTileBrushSpinner.preferredSize.height)
     ndsTileBrushSpinner.toolTipText =
@@ -668,8 +696,19 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsGridCheck.addActionListener { view()?.showGrid = ndsGridCheck.isSelected }
     ndsCollisionCheck.addActionListener { view()?.showCollision = ndsCollisionCheck.isSelected }
     ndsWalkSurfaceCheck.toolTipText =
-        "Show the ROM's invisible BDHC walkable-height plates (read-only; not saved)"
+        "Show ROM BDHC or the custom map's explicitly authored walkable-height planes"
     ndsWalkSurfaceCheck.addActionListener { refreshNdsWalkSurfaces() }
+    ndsWalkTool.toolTipText =
+        "Flat: drag an area; Slope: drag from its low edge to high edge; From prop: click stairs"
+    ndsWalkTool.addActionListener {
+      clearNdsWalkPaintPreview()
+      updateNdsWalkToolControls()
+      if (ndsPaintMode.selectedIndex == 8) onNdsPaintModeChanged()
+    }
+    ndsWalkHighSpinner.editor = JSpinner.NumberEditor(ndsWalkHighSpinner, "0.####")
+    ndsWalkHighSpinner.preferredSize = Dimension(72, ndsWalkHighSpinner.preferredSize.height)
+    ndsWalkHighSpinner.toolTipText = "Height reached at the end of a low-to-high slope drag"
+    ndsWalkHighSpinner.addChangeListener { refreshNdsWalkPaintPreview() }
     ndsCollisionEditView.addActionListener {
       val enabled = ndsCollisionEditView.isSelected
       if (enabled) {
@@ -766,6 +805,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     terrainToolbar.add(ndsCollisionEditView)
     terrainToolbar.add(ndsShowOnlyTiles)
     terrainToolbar.add(ndsWalkSurfaceCheck)
+    terrainToolbar.add(ndsWalkToolLabel)
+    terrainToolbar.add(ndsWalkTool)
+    terrainToolbar.add(ndsWalkHighLabel)
+    terrainToolbar.add(ndsWalkHighSpinner)
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsSnapToGridCheck)
     terrainToolbar.add(ndsRestoreTerrainButton)
@@ -804,6 +847,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { x, z -> eraseNdsCell(x, z) },
             { ndsHistory.beginStroke(ndsStrokeLabel()) },
             { cell -> updateNdsCursorCoordinates(cell) },
+            { hit -> finishNdsWalkSurfacePaint(hit) },
         )
     val created =
         try {
@@ -814,6 +858,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { x, z -> eraseNdsCell(x, z) },
               { ndsHistory.beginStroke(ndsStrokeLabel()) },
               { cell -> updateNdsCursorCoordinates(cell) },
+              { hit -> finishNdsWalkSurfacePaint(hit) },
           )
         } catch (t: Throwable) {
           System.out.println("[Nds] OpenGL view unavailable (${t.message}); using software renderer")
@@ -847,14 +892,824 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun refreshNdsWalkSurfaces() {
     val triangles = currentNdsWalkSurfaces()
     view()?.walkSurfaceTriangles = triangles
+    refreshNdsWalkSurfaceHandles()
+    val map = currentNdsMap
     status.text = when {
       !ndsWalkSurfaceCheck.isSelected -> "Walk-surface overlay hidden"
+      triangles.isNotEmpty() && map?.isCustom == true ->
+        "Showing ${triangles.size / 2} custom walk-surface plane(s)"
       triangles.isNotEmpty() -> "Showing ${triangles.size / 2} ROM BDHC walk-surface plate(s)"
-      currentNdsMap?.isCustom == true -> "This custom map has no ROM BDHC walk surfaces"
-      currentNdsMap != null -> "No compatible ROM BDHC walk surfaces are available for this map"
+      map?.isCustom == true -> "This custom map has no authored walk surfaces"
+      map != null -> "No compatible ROM BDHC walk surfaces are available for this map"
       else -> "Open a Nintendo DS map to show its ROM BDHC walk surfaces"
     }
   }
+
+  /** Keeps the walk-surface toolbar small: only controls used by the active tool are visible. */
+  private fun updateNdsWalkToolControls() {
+    val walkMode = ndsPaintMode.selectedIndex == 8
+    val slopeTool = walkMode && ndsWalkTool.selectedIndex == 1
+    ndsWalkToolLabel.isVisible = walkMode
+    ndsWalkTool.isVisible = walkMode
+    ndsWalkHighLabel.isVisible = slopeTool
+    ndsWalkHighSpinner.isVisible = slopeTool
+    ndsHeightSpinner.toolTipText = when {
+      slopeTool -> "Height at the low edge of the slope"
+      walkMode && ndsWalkTool.selectedIndex == 0 -> "Height of the flat walk surface"
+      else -> "Tile height in map-tile units; arrows change it by 0.25 and decimals may be typed"
+    }
+    ndsWalkTool.parent?.revalidate()
+    ndsWalkTool.parent?.repaint()
+  }
+
+  private fun walkDirection(role: NdsWalkHandleRole): NdsWalkSurfaceDirection? = when (role) {
+    NdsWalkHandleRole.CENTER, NdsWalkHandleRole.ROTATE, NdsWalkHandleRole.SCALE -> null
+    NdsWalkHandleRole.NORTH -> NdsWalkSurfaceDirection.NORTH
+    NdsWalkHandleRole.EAST -> NdsWalkSurfaceDirection.EAST
+    NdsWalkHandleRole.SOUTH -> NdsWalkSurfaceDirection.SOUTH
+    NdsWalkHandleRole.WEST -> NdsWalkSurfaceDirection.WEST
+  }
+
+  private fun walkRole(direction: NdsWalkSurfaceDirection): NdsWalkHandleRole? = when (direction) {
+    NdsWalkSurfaceDirection.FLAT -> null
+    NdsWalkSurfaceDirection.NORTH -> NdsWalkHandleRole.NORTH
+    NdsWalkSurfaceDirection.EAST -> NdsWalkHandleRole.EAST
+    NdsWalkSurfaceDirection.SOUTH -> NdsWalkHandleRole.SOUTH
+    NdsWalkSurfaceDirection.WEST -> NdsWalkHandleRole.WEST
+  }
+
+  private fun walkHandlePoint(
+      surface: NdsWalkSurface,
+      role: NdsWalkHandleRole,
+  ): Triple<Float, Float, Float> {
+    if (role == NdsWalkHandleRole.ROTATE) {
+      val reference = surface.riseDirection.takeUnless { it == NdsWalkSurfaceDirection.FLAT }
+          ?: NdsWalkSurfaceDirection.NORTH
+      val edgeRole = requireNotNull(walkRole(reference))
+      val edge = walkHandlePoint(surface, edgeRole)
+      val offset = 0.8f
+      return when (reference) {
+        NdsWalkSurfaceDirection.NORTH -> Triple(edge.first, edge.second + 0.18f, edge.third - offset)
+        NdsWalkSurfaceDirection.EAST -> Triple(edge.first + offset, edge.second + 0.18f, edge.third)
+        NdsWalkSurfaceDirection.SOUTH -> Triple(edge.first, edge.second + 0.18f, edge.third + offset)
+        NdsWalkSurfaceDirection.WEST -> Triple(edge.first - offset, edge.second + 0.18f, edge.third)
+        NdsWalkSurfaceDirection.FLAT -> edge
+      }
+    }
+    if (role == NdsWalkHandleRole.SCALE) {
+      val x = surface.maxX + 0.55f
+      val z = surface.maxZ + 0.55f
+      val y = surface.heightAt(surface.maxX.toDouble(), surface.maxZ.toDouble()).toFloat() + 0.18f
+      return Triple(x, y, z)
+    }
+    val x = when (role) {
+      NdsWalkHandleRole.EAST -> surface.maxX.toFloat()
+      NdsWalkHandleRole.WEST -> surface.minX.toFloat()
+      else -> (surface.minX + surface.maxX) / 2f
+    }
+    val z = when (role) {
+      NdsWalkHandleRole.NORTH -> surface.minZ.toFloat()
+      NdsWalkHandleRole.SOUTH -> surface.maxZ.toFloat()
+      else -> (surface.minZ + surface.maxZ) / 2f
+    }
+    return Triple(x, surface.heightAt(x.toDouble(), z.toDouble()).toFloat() + 0.04f, z)
+  }
+
+  /** Shows all four editable edges; changing a perpendicular edge reorients the slope. */
+  private fun refreshNdsWalkSurfaceHandles() {
+    val v = ndsView ?: return
+    val surface = currentNdsMap?.walkSurfaces
+        ?.firstOrNull { it.id == selectedNdsWalkSurfaceId }
+    if (surface == null || ndsPaintMode.selectedIndex != 8) {
+      selectedNdsWalkSurfaceId = null
+      v.walkSurfaceHandles = emptyList()
+      return
+    }
+    val roles = listOf(
+        NdsWalkHandleRole.NORTH, NdsWalkHandleRole.EAST,
+        NdsWalkHandleRole.SOUTH, NdsWalkHandleRole.WEST)
+    val handles = mutableListOf<NdsWalkHandle>()
+    val center = walkHandlePoint(surface, NdsWalkHandleRole.CENTER)
+    handles += NdsWalkHandle(
+        NdsWalkHandleRole.CENTER, center.first, center.second, center.third,
+        0xFFFFFFFF.toInt())
+    for (role in roles) {
+      val direction = requireNotNull(walkDirection(role))
+      val point = walkHandlePoint(surface, role)
+      val color = when {
+        surface.riseDirection == NdsWalkSurfaceDirection.FLAT -> 0xFF50E3C2.toInt()
+        direction == surface.riseDirection -> 0xFFFF9D2E.toInt()
+        direction == surface.riseDirection.opposite() -> 0xFF3498FF.toInt()
+        else -> 0xFF50E3C2.toInt()
+      }
+      handles += NdsWalkHandle(role, point.first, point.second, point.third, color)
+    }
+    val rotate = walkHandlePoint(surface, NdsWalkHandleRole.ROTATE)
+    handles += NdsWalkHandle(
+        NdsWalkHandleRole.ROTATE, rotate.first, rotate.second, rotate.third,
+        0xFFC76CFF.toInt())
+    val scale = walkHandlePoint(surface, NdsWalkHandleRole.SCALE)
+    handles += NdsWalkHandle(
+        NdsWalkHandleRole.SCALE, scale.first, scale.second, scale.third,
+        0xFFFFD34D.toInt())
+    v.walkSurfaceHandles = handles
+  }
+
+  private fun selectNdsWalkSurface(id: String?) {
+    val map = currentNdsMap
+    selectedNdsWalkSurfaceId = id?.takeIf { candidate ->
+      map?.walkSurfaces?.any { it.id == candidate } == true
+    }
+    refreshNdsWalkSurfaceHandles()
+    val surface = map?.walkSurfaces?.firstOrNull { it.id == selectedNdsWalkSurfaceId }
+    status.text = if (surface == null) {
+      "Walk surface selection cleared"
+    } else {
+      "Selected walk surface X ${surface.minX}-${surface.maxX - 1}, " +
+          "Z ${surface.minZ}-${surface.maxZ - 1}; move/resize icons, purple rotates, " +
+          "yellow scales, Shift+any edge changes slope, Shift+center changes height"
+    }
+  }
+
+  private fun clearNdsWalkTransform() {
+    ndsWalkTransformKind = null
+    ndsWalkTransformBefore = null
+    ndsWalkTransformOriginal = null
+    ndsWalkTransformStartCell = null
+    ndsWalkTransformStartGround = null
+    ndsWalkTransformStartScreen = null
+    ndsWalkTransformScreenAxis = null
+    ndsWalkTransformEdge = null
+    ndsWalkTransformCenterScreen = null
+  }
+
+  private fun clearNdsWalkPaintPreview() {
+    ndsWalkPaintStart = null
+    ndsWalkPaintCurrent = null
+    ndsWalkPaintBefore = null
+    ndsWalkPaintErasing = false
+    ndsWalkPreview = null
+    selectedNdsWalkSurfaceId = null
+    clearNdsWalkTransform()
+    view()?.walkSurfaceTriangles = currentNdsWalkSurfaces()
+  }
+
+  private fun walkPaintCell(hit: NdsPointerHit?): Pair<Int, Int>? {
+    val map = currentNdsMap ?: return null
+    val x = hit?.cellX ?: return null
+    val z = hit.cellZ ?: return null
+    return (x to z).takeIf { x in 0 until map.grid.cols && z in 0 until map.grid.rows }
+  }
+
+  /** Builds the rectangle currently being dragged; slope direction follows low-edge to high-edge. */
+  private fun buildNdsWalkPaintSurface(id: String): NdsWalkSurface? {
+    val start = ndsWalkPaintStart ?: return null
+    val end = ndsWalkPaintCurrent ?: return null
+    val low = (ndsHeightSpinner.value as Number).toDouble()
+    val minX = minOf(start.first, end.first)
+    val minZ = minOf(start.second, end.second)
+    val maxX = maxOf(start.first, end.first) + 1
+    val maxZ = maxOf(start.second, end.second) + 1
+    if (ndsWalkTool.selectedIndex == 0) {
+      return NdsWalkSurface.cardinal(
+          id, minX, minZ, maxX, maxZ, low, low, NdsWalkSurfaceDirection.FLAT)
+    }
+    if (ndsWalkTool.selectedIndex != 1 || start == end) return null
+    val high = (ndsWalkHighSpinner.value as Number).toDouble()
+    if (high <= low) return null
+    val dx = end.first - start.first
+    val dz = end.second - start.second
+    val direction = if (kotlin.math.abs(dx) >= kotlin.math.abs(dz)) {
+      if (dx > 0) NdsWalkSurfaceDirection.EAST else NdsWalkSurfaceDirection.WEST
+    } else {
+      if (dz > 0) NdsWalkSurfaceDirection.SOUTH else NdsWalkSurfaceDirection.NORTH
+    }
+    return NdsWalkSurface.cardinal(id, minX, minZ, maxX, maxZ, low, high, direction)
+  }
+
+  private fun refreshNdsWalkPaintPreview() {
+    if (ndsPaintMode.selectedIndex != 8 || ndsWalkPaintErasing) return
+    val map = currentNdsMap ?: return
+    val project = currentNdsHolder?.project ?: return
+    val preview = buildNdsWalkPaintSurface("__walk-preview__")
+    ndsWalkPreview = preview
+    val base = currentNdsWalkSurfaces()
+    view()?.walkSurfaceTriangles =
+        if (preview == null) base else base + project.walkSurfacePreviewTriangles(map, preview)
+  }
+
+  private fun eraseNdsWalkSurfaceAt(map: NdsMap, cell: Pair<Int, Int>) {
+    val removed = map.walkSurfaces.filter {
+      it.contains(cell.first + 0.5, cell.second + 0.5)
+    }.map { it.id }.toSet()
+    if (removed.isNotEmpty() && map.walkSurfaces.removeAll { it.id in removed }) {
+      if (selectedNdsWalkSurfaceId in removed) selectedNdsWalkSurfaceId = null
+      view()?.walkSurfaceTriangles = currentNdsWalkSurfaces()
+      refreshNdsWalkSurfaceHandles()
+    }
+  }
+
+  private fun beginNdsWalkTransform(
+      map: NdsMap,
+      surface: NdsWalkSurface,
+      hit: NdsPointerHit,
+      kind: NdsWalkTransformKind,
+      edge: NdsWalkSurfaceDirection? = null,
+  ) {
+    selectedNdsWalkSurfaceId = surface.id
+    ndsWalkTransformKind = kind
+    ndsWalkTransformBefore = NdsSceneSnapshot.of(map)
+    ndsWalkTransformOriginal = surface.copy()
+    ndsWalkTransformStartCell = walkPaintCell(hit)
+    ndsWalkTransformStartGround =
+        if (hit.groundX != null && hit.groundZ != null) hit.groundX to hit.groundZ else null
+    ndsWalkTransformStartScreen =
+        if (hit.screenX != null && hit.screenY != null) hit.screenX to hit.screenY else null
+    ndsWalkTransformEdge = edge
+    val center = walkHandlePoint(surface, NdsWalkHandleRole.CENTER)
+    ndsWalkTransformCenterScreen = view()?.projectMapPoint(center.first, center.second, center.third)
+        ?.let { it[0] to it[1] }
+    ndsWalkTransformScreenAxis = if (edge != null || kind == NdsWalkTransformKind.MOVE_HEIGHT) {
+      val point = if (edge == null) center else {
+        val role = requireNotNull(walkRole(edge))
+        walkHandlePoint(surface, role)
+      }
+      val base = view()?.projectMapPoint(point.first, point.second, point.third)
+      val raised = view()?.projectMapPoint(point.first, point.second + 1f, point.third)
+      if (base == null || raised == null) null
+      else (raised[0] - base[0]) to (raised[1] - base[1])
+    } else null
+    refreshNdsWalkSurfaceHandles()
+  }
+
+  private fun applyNdsWalkTransform(map: NdsMap, hit: NdsPointerHit) {
+    val original = ndsWalkTransformOriginal ?: return
+    val surface = map.walkSurfaces.firstOrNull { it.id == original.id } ?: return
+    when (ndsWalkTransformKind) {
+      NdsWalkTransformKind.MOVE -> {
+        val start = ndsWalkTransformStartCell ?: return
+        val current = walkPaintCell(hit) ?: return
+        val rawDx = current.first - start.first
+        val rawDz = current.second - start.second
+        val dx = rawDx.coerceIn(-original.minX, map.grid.cols - original.maxX)
+        val dz = rawDz.coerceIn(-original.minZ, map.grid.rows - original.maxZ)
+        surface.minX = original.minX + dx
+        surface.maxX = original.maxX + dx
+        surface.minZ = original.minZ + dz
+        surface.maxZ = original.maxZ + dz
+        status.text =
+            "Moving walk surface: X ${surface.minX}-${surface.maxX - 1}, " +
+                "Z ${surface.minZ}-${surface.maxZ - 1}"
+      }
+      NdsWalkTransformKind.MOVE_HEIGHT -> {
+        val start = ndsWalkTransformStartScreen ?: return
+        val mx = hit.screenX ?: return
+        val my = hit.screenY ?: return
+        val axis = ndsWalkTransformScreenAxis
+        val dx = (mx - start.first).toDouble()
+        val dy = (my - start.second).toDouble()
+        val amount = if (axis == null || axis.first * axis.first + axis.second * axis.second < 4.0) {
+          -dy / 24.0
+        } else {
+          (dx * axis.first + dy * axis.second) /
+              (axis.first * axis.first + axis.second * axis.second)
+        }
+        val delta = (kotlin.math.round(amount * 4.0) / 4.0)
+        surface.copyHeightShapeFrom(original)
+        surface.translateHeight(delta)
+        status.text = if (surface.riseDirection == NdsWalkSurfaceDirection.FLAT) {
+          "Moving walk surface vertically: height ${formatNdsHeight(surface.lowHeight)}"
+        } else {
+          "Moving slope vertically: ${formatNdsHeight(surface.lowHeight)} to " +
+              formatNdsHeight(surface.highHeight)
+        }
+      }
+      NdsWalkTransformKind.RESIZE -> {
+        val edge = ndsWalkTransformEdge ?: return
+        val start = ndsWalkTransformStartGround ?: return
+        val x = hit.groundX ?: return
+        val z = hit.groundZ ?: return
+        surface.minX = original.minX
+        surface.maxX = original.maxX
+        surface.minZ = original.minZ
+        surface.maxZ = original.maxZ
+        val coordinate = when (edge) {
+          NdsWalkSurfaceDirection.NORTH ->
+            kotlin.math.round(original.minZ + z - start.second).toInt()
+          NdsWalkSurfaceDirection.EAST ->
+            kotlin.math.round(original.maxX + x - start.first).toInt()
+          NdsWalkSurfaceDirection.SOUTH ->
+            kotlin.math.round(original.maxZ + z - start.second).toInt()
+          NdsWalkSurfaceDirection.WEST ->
+            kotlin.math.round(original.minX + x - start.first).toInt()
+          NdsWalkSurfaceDirection.FLAT -> return
+        }
+        surface.resizeEdge(edge, coordinate, map.grid)
+        status.text =
+            "Resizing ${edge.name.lowercase()} edge: " +
+                "X ${surface.minX}-${surface.maxX - 1}, Z ${surface.minZ}-${surface.maxZ - 1}"
+      }
+      NdsWalkTransformKind.ROTATE -> {
+        val x = hit.groundX ?: return
+        val z = hit.groundZ ?: return
+        val centerX = (original.minX + original.maxX) / 2f
+        val centerZ = (original.minZ + original.maxZ) / 2f
+        val dx = x - centerX
+        val dz = z - centerZ
+        if (kotlin.math.abs(dx) < 0.15f && kotlin.math.abs(dz) < 0.15f) return
+        val target = if (kotlin.math.abs(dx) >= kotlin.math.abs(dz)) {
+          if (dx >= 0f) NdsWalkSurfaceDirection.EAST else NdsWalkSurfaceDirection.WEST
+        } else {
+          if (dz >= 0f) NdsWalkSurfaceDirection.SOUTH else NdsWalkSurfaceDirection.NORTH
+        }
+        val reference = original.riseDirection.takeUnless { it == NdsWalkSurfaceDirection.FLAT }
+            ?: NdsWalkSurfaceDirection.NORTH
+        fun index(direction: NdsWalkSurfaceDirection): Int = when (direction) {
+          NdsWalkSurfaceDirection.NORTH -> 0
+          NdsWalkSurfaceDirection.EAST -> 1
+          NdsWalkSurfaceDirection.SOUTH -> 2
+          NdsWalkSurfaceDirection.WEST -> 3
+          NdsWalkSurfaceDirection.FLAT -> 0
+        }
+        val turns = (index(target) - index(reference) + 4) % 4
+        surface.minX = original.minX
+        surface.maxX = original.maxX
+        surface.minZ = original.minZ
+        surface.maxZ = original.maxZ
+        surface.copyHeightShapeFrom(original)
+        surface.rotateQuarterTurns(turns, map.grid)
+        status.text =
+            "Rotating walk surface: ${turns * 90}°, " +
+                "rises ${surface.riseDirection.name.lowercase()}"
+      }
+      NdsWalkTransformKind.SCALE -> {
+        val start = ndsWalkTransformStartScreen ?: return
+        val center = ndsWalkTransformCenterScreen ?: return
+        val mx = hit.screenX?.toDouble() ?: return
+        val my = hit.screenY?.toDouble() ?: return
+        val startDistance = kotlin.math.hypot(start.first - center.first, start.second - center.second)
+        if (startDistance < 2.0) return
+        val currentDistance = kotlin.math.hypot(mx - center.first, my - center.second)
+        val factor = (currentDistance / startDistance).coerceIn(0.05, 32.0)
+        surface.minX = original.minX
+        surface.maxX = original.maxX
+        surface.minZ = original.minZ
+        surface.maxZ = original.maxZ
+        surface.scaleFootprint(factor, map.grid)
+        status.text =
+            "Scaling walk surface: ${surface.maxX - surface.minX}×" +
+                "${surface.maxZ - surface.minZ} cells"
+      }
+      NdsWalkTransformKind.EDGE_HEIGHT -> {
+        val edge = ndsWalkTransformEdge ?: return
+        val start = ndsWalkTransformStartScreen ?: return
+        val mx = hit.screenX ?: return
+        val my = hit.screenY ?: return
+        val axis = ndsWalkTransformScreenAxis
+        val dx = (mx - start.first).toDouble()
+        val dy = (my - start.second).toDouble()
+        val amount = if (axis == null || axis.first * axis.first + axis.second * axis.second < 4.0) {
+          -dy / 24.0
+        } else {
+          (dx * axis.first + dy * axis.second) /
+              (axis.first * axis.first + axis.second * axis.second)
+        }
+        val originalEdgeHeight = original.heightAtEdge(edge)
+        val newHeight = (kotlin.math.round((originalEdgeHeight + amount) * 4.0) / 4.0)
+            .coerceIn(-32.0, 32.0)
+        surface.copyHeightShapeFrom(original)
+        surface.setEdgeHeight(edge, newHeight)
+        status.text = if (surface.riseDirection == NdsWalkSurfaceDirection.FLAT) {
+          "Walk surface is flat at ${formatNdsHeight(surface.lowHeight)}"
+        } else {
+          "Slope rises ${surface.riseDirection.name.lowercase()}: " +
+              "${formatNdsHeight(surface.lowHeight)} to ${formatNdsHeight(surface.highHeight)}"
+        }
+      }
+      null -> return
+    }
+    view()?.walkSurfaceTriangles = currentNdsWalkSurfaces()
+    refreshNdsWalkSurfaceHandles()
+  }
+
+  private fun finishNdsWalkTransform(map: NdsMap) {
+    val kind = ndsWalkTransformKind ?: return
+    val before = ndsWalkTransformBefore ?: return
+    val after = NdsSceneSnapshot.of(map)
+    val changed = !before.sameAs(after)
+    ndsHistory.recordScene(
+        when (kind) {
+          NdsWalkTransformKind.MOVE -> "move walk surface"
+          NdsWalkTransformKind.MOVE_HEIGHT -> "move walk surface vertically"
+          NdsWalkTransformKind.RESIZE -> "resize walk surface"
+          NdsWalkTransformKind.ROTATE -> "rotate walk surface"
+          NdsWalkTransformKind.SCALE -> "scale walk surface"
+          NdsWalkTransformKind.EDGE_HEIGHT -> "adjust walk slope"
+        },
+        before,
+        after,
+    )
+    clearNdsWalkTransform()
+    refreshNdsWalkSurfaces()
+    if (changed) {
+      markDirty()
+      status.text = when (kind) {
+        NdsWalkTransformKind.MOVE -> "Moved walk surface (Ctrl+Z to undo)"
+        NdsWalkTransformKind.MOVE_HEIGHT -> "Moved walk surface vertically (Ctrl+Z to undo)"
+        NdsWalkTransformKind.RESIZE -> "Resized walk surface (Ctrl+Z to undo)"
+        NdsWalkTransformKind.ROTATE -> "Rotated walk surface (Ctrl+Z to undo)"
+        NdsWalkTransformKind.SCALE -> "Scaled walk surface (Ctrl+Z to undo)"
+        NdsWalkTransformKind.EDGE_HEIGHT -> "Adjusted walk-surface slope (Ctrl+Z to undo)"
+      }
+    }
+  }
+
+  private fun deleteSelectedNdsWalkSurface() {
+    val map = currentNdsMap ?: return
+    val id = selectedNdsWalkSurfaceId ?: return
+    val before = NdsSceneSnapshot.of(map)
+    if (!map.walkSurfaces.removeAll { it.id == id }) return
+    ndsHistory.recordScene("delete walk surface", before, NdsSceneSnapshot.of(map))
+    selectedNdsWalkSurfaceId = null
+    clearNdsWalkTransform()
+    markDirty()
+    refreshNdsWalkSurfaces()
+    status.text = "Deleted walk surface (Ctrl+Z to undo)"
+  }
+
+  /** Handles the simple Flat/Slope drag tools and the geometry-driven From prop click tool. */
+  private fun handleNdsWalkSurfaceInteraction(
+      map: NdsMap,
+      hit: NdsPointerHit,
+      dragging: Boolean,
+  ) {
+    if (!map.isCustom) {
+      if (!dragging) status.text = "ROM walk surfaces come from BDHC and are read-only"
+      return
+    }
+    if (dragging && ndsWalkTransformKind != null) {
+      applyNdsWalkTransform(map, hit)
+      return
+    }
+    if (!dragging) {
+      val selected = map.walkSurfaces.firstOrNull { it.id == selectedNdsWalkSurfaceId }
+      if (!hit.ctrlDown && hit.shiftDown) {
+        if (selected != null && hit.walkHandle in
+            setOf(NdsWalkHandleRole.ROTATE, NdsWalkHandleRole.SCALE)) {
+          status.text = "Drag the rotate/scale icon without Shift"
+          return
+        }
+        if (selected != null && hit.walkHandle == NdsWalkHandleRole.CENTER) {
+          clearNdsWalkPaintPreview()
+          beginNdsWalkTransform(map, selected, hit, NdsWalkTransformKind.MOVE_HEIGHT)
+          status.text = "Moving selected walk surface vertically; drag the center icon up or down"
+          return
+        }
+        val edge = hit.walkHandle?.let(::walkDirection)
+        if (selected != null && edge != null) {
+          clearNdsWalkPaintPreview()
+          beginNdsWalkTransform(map, selected, hit, NdsWalkTransformKind.EDGE_HEIGHT, edge)
+          status.text =
+              "Adjusting ${edge.name.lowercase()} edge; perpendicular edges reorient the slope"
+        } else {
+          selectNdsWalkSurface(hit.walkSurfaceId)
+        }
+        return
+      }
+      if (!hit.ctrlDown && selected != null && hit.walkHandle == NdsWalkHandleRole.ROTATE) {
+        clearNdsWalkPaintPreview()
+        beginNdsWalkTransform(
+            map, selected, hit, NdsWalkTransformKind.ROTATE)
+        status.text = "Rotating selected walk surface; drag around its center"
+        return
+      }
+      if (!hit.ctrlDown && selected != null && hit.walkHandle == NdsWalkHandleRole.SCALE) {
+        clearNdsWalkPaintPreview()
+        beginNdsWalkTransform(
+            map, selected, hit, NdsWalkTransformKind.SCALE)
+        status.text = "Scaling selected walk surface; drag toward or away from its center"
+        return
+      }
+      val resizeEdge = hit.walkHandle?.let(::walkDirection)
+      if (!hit.ctrlDown && selected != null && resizeEdge != null) {
+        clearNdsWalkPaintPreview()
+        beginNdsWalkTransform(
+            map, selected, hit, NdsWalkTransformKind.RESIZE, resizeEdge)
+        status.text = "Resizing ${resizeEdge.name.lowercase()} edge; drag across the grid"
+        return
+      }
+      if (!hit.ctrlDown && selected != null &&
+          (hit.walkHandle == NdsWalkHandleRole.CENTER || hit.walkSurfaceId == selected.id)) {
+        clearNdsWalkPaintPreview()
+        beginNdsWalkTransform(map, selected, hit, NdsWalkTransformKind.MOVE)
+        status.text = "Moving selected walk surface; drag across the grid"
+        return
+      }
+      if (!hit.ctrlDown && selected != null) {
+        // Selection is a distinct editing state. A miss clears it and consumes this gesture so a
+        // slightly missed handle can never create a new plane underneath the one being adjusted.
+        selectNdsWalkSurface(null)
+        status.text = "Walk surface deselected; paint on the next click"
+        return
+      }
+
+      val cell = walkPaintCell(hit) ?: return
+      clearNdsWalkPaintPreview()
+      ndsWalkSurfaceCheck.isSelected = true
+      ndsWalkPaintBefore = NdsSceneSnapshot.of(map)
+      ndsWalkPaintErasing = hit.ctrlDown
+      ndsWalkPaintStart = cell
+      ndsWalkPaintCurrent = cell
+      if (ndsWalkPaintErasing) {
+        eraseNdsWalkSurfaceAt(map, cell)
+        status.text = "Erasing walk surfaces; release to finish"
+        return
+      }
+      if (ndsWalkTool.selectedIndex == 2) {
+        val group = hit.modelGroup
+        val propId = group?.removePrefix("prop:")?.takeIf { group.startsWith("prop:") }
+        val fitted = propId?.let { currentNdsHolder?.project?.walkSurfaceFromProp(map, it) }
+        val before = ndsWalkPaintBefore
+        clearNdsWalkPaintPreview()
+        if (fitted == null || before == null) {
+          status.text = "Click a stair prop with a clear cardinal rise; this shape could not be fitted"
+          return
+        }
+        map.walkSurfaces.removeAll {
+          it.minX == fitted.minX && it.minZ == fitted.minZ &&
+              it.maxX == fitted.maxX && it.maxZ == fitted.maxZ
+        }
+        map.walkSurfaces += fitted
+        selectedNdsWalkSurfaceId = fitted.id
+        ndsHistory.recordScene("fit walk surface to prop", before, NdsSceneSnapshot.of(map))
+        markDirty()
+        refreshNdsWalkSurfaces()
+        status.text = "Created a ${fitted.riseDirection.name.lowercase()}-rising walk surface from the prop"
+        return
+      }
+      refreshNdsWalkPaintPreview()
+      return
+    }
+
+    val cell = walkPaintCell(hit) ?: return
+    if (ndsWalkPaintStart == null) return
+    ndsWalkPaintCurrent = cell
+    if (ndsWalkPaintErasing) eraseNdsWalkSurfaceAt(map, cell)
+    else refreshNdsWalkPaintPreview()
+  }
+
+  /** Commits one walk-surface drag as a single undo step. */
+  private fun finishNdsWalkSurfacePaint(hit: NdsPointerHit?) {
+    if (ndsPaintMode.selectedIndex != 8) {
+      if (ndsWalkPaintStart != null) clearNdsWalkPaintPreview()
+      return
+    }
+    val map = currentNdsMap ?: return
+    if (ndsWalkTransformKind != null) {
+      finishNdsWalkTransform(map)
+      return
+    }
+    val before = ndsWalkPaintBefore ?: return
+    walkPaintCell(hit)?.let { ndsWalkPaintCurrent = it }
+    if (ndsWalkPaintErasing) {
+      val after = NdsSceneSnapshot.of(map)
+      val changed = !before.sameAs(after)
+      ndsHistory.recordScene("erase walk surface", before, after)
+      clearNdsWalkPaintPreview()
+      if (changed) {
+        markDirty()
+        status.text = "Erased walk surface(s) (Ctrl+Z to undo)"
+      }
+      return
+    }
+    if (ndsWalkTool.selectedIndex == 2) {
+      clearNdsWalkPaintPreview()
+      return
+    }
+    val surface = buildNdsWalkPaintSurface("walk-${java.util.UUID.randomUUID()}")
+    if (surface == null) {
+      val message = if (ndsWalkTool.selectedIndex == 1 &&
+          (ndsWalkHighSpinner.value as Number).toDouble() <=
+              (ndsHeightSpinner.value as Number).toDouble()) {
+        "Slope High must be greater than Height"
+      } else {
+        "Drag a slope across at least two squares"
+      }
+      clearNdsWalkPaintPreview()
+      status.text = message
+      return
+    }
+    map.walkSurfaces.removeAll {
+      it.minX == surface.minX && it.minZ == surface.minZ &&
+          it.maxX == surface.maxX && it.maxZ == surface.maxZ
+    }
+    map.walkSurfaces += surface
+    selectedNdsWalkSurfaceId = surface.id
+    ndsHistory.recordScene("paint walk surface", before, NdsSceneSnapshot.of(map))
+    clearNdsWalkPaintPreview()
+    markDirty()
+    refreshNdsWalkSurfaces()
+    status.text = if (surface.riseDirection == NdsWalkSurfaceDirection.FLAT) {
+      "Painted flat walk surface at height ${formatNdsHeight(surface.lowHeight)}"
+    } else {
+      "Painted ${surface.riseDirection.name.lowercase()} slope from " +
+          "${formatNdsHeight(surface.lowHeight)} to ${formatNdsHeight(surface.highHeight)}"
+    }
+  }
+
+  /** Coordinate-based authoring stays separate from tile, collision and permission paint modes. */
+  private fun manageNdsWalkSurfaces() {
+    val map = currentNdsMap
+    if (map == null || !map.isCustom) {
+      JOptionPane.showMessageDialog(
+          this,
+          "Walk surfaces can be authored only for custom maps. ROM maps already use their BDHC.",
+          "Custom Walk Surfaces",
+          JOptionPane.WARNING_MESSAGE,
+      )
+      return
+    }
+
+    val listModel = DefaultListModel<String>()
+    val list = JList(listModel).also {
+      it.selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION
+      it.visibleRowCount = 10
+    }
+    fun label(surface: NdsWalkSurface): String {
+      val tiles = "X ${surface.minX}-${surface.maxX - 1}, Z ${surface.minZ}-${surface.maxZ - 1}"
+      val height = if (surface.riseDirection == NdsWalkSurfaceDirection.FLAT) {
+        "height ${formatNdsHeight(surface.lowHeight)}"
+      } else {
+        "${formatNdsHeight(surface.lowHeight)} to ${formatNdsHeight(surface.highHeight)}, " +
+            "rises ${surface.riseDirection.name.lowercase()}"
+      }
+      return "$tiles — $height"
+    }
+    fun reload(selected: Int = list.selectedIndex) {
+      listModel.clear()
+      map.walkSurfaces.forEach { listModel.addElement(label(it)) }
+      if (listModel.size > 0) list.selectedIndex = selected.coerceIn(0, listModel.size - 1)
+    }
+
+    val dialog = JDialog(this, "Custom Walk Surfaces", true)
+    val add = JButton("Add...")
+    val edit = JButton("Edit...")
+    val remove = JButton("Remove")
+    val close = JButton("Close")
+    fun changed(message: String) {
+      markDirty()
+      ndsWalkSurfaceCheck.isSelected = true
+      refreshNdsWalkSurfaces()
+      status.text = "$message (Ctrl+Z to undo)"
+    }
+    add.addActionListener {
+      val surface = editNdsWalkSurface(map, null) ?: return@addActionListener
+      recordNdsSceneChange("add walk surface") { map.walkSurfaces += surface }
+      reload(map.walkSurfaces.lastIndex)
+      changed("Added custom walk surface")
+    }
+    edit.addActionListener {
+      val index = list.selectedIndex
+      val existing = map.walkSurfaces.getOrNull(index) ?: return@addActionListener
+      val replacement = editNdsWalkSurface(map, existing) ?: return@addActionListener
+      recordNdsSceneChange("edit walk surface") { map.walkSurfaces[index] = replacement }
+      reload(index)
+      changed("Updated custom walk surface")
+    }
+    remove.addActionListener {
+      val index = list.selectedIndex
+      if (index !in map.walkSurfaces.indices) return@addActionListener
+      recordNdsSceneChange("remove walk surface") { map.walkSurfaces.removeAt(index) }
+      reload(index)
+      changed("Removed custom walk surface")
+    }
+    close.addActionListener { dialog.dispose() }
+    list.addListSelectionListener {
+      val selected = list.selectedIndex >= 0
+      edit.isEnabled = selected
+      remove.isEnabled = selected
+    }
+    reload()
+    edit.isEnabled = list.selectedIndex >= 0
+    remove.isEnabled = list.selectedIndex >= 0
+
+    dialog.layout = BorderLayout(8, 8)
+    dialog.add(
+        JLabel(
+            "Planes affect neither visible tiles nor painted collision; they describe walkable height."),
+        BorderLayout.NORTH,
+    )
+    dialog.add(JScrollPane(list).also { it.preferredSize = Dimension(600, 230) }, BorderLayout.CENTER)
+    dialog.add(JPanel(FlowLayout(FlowLayout.RIGHT)).also {
+      it.add(add); it.add(edit); it.add(remove); it.add(close)
+    }, BorderLayout.SOUTH)
+    dialog.rootPane.defaultButton = close
+    dialog.pack()
+    dialog.setLocationRelativeTo(this)
+    dialog.isVisible = true
+  }
+
+  /** Adds or edits one flat plane/cardinal slope using inclusive tile coordinates. */
+  private fun editNdsWalkSurface(map: NdsMap, existing: NdsWalkSurface?): NdsWalkSurface? {
+    val cursor = ndsCursorCell ?: (0 to 0)
+    val startX = JTextField((existing?.minX ?: cursor.first).toString(), 6)
+    val startZ = JTextField((existing?.minZ ?: cursor.second).toString(), 6)
+    val endX = JTextField(((existing?.maxX?.minus(1)) ?: cursor.first).toString(), 6)
+    val endZ = JTextField(((existing?.maxZ?.minus(1)) ?: cursor.second).toString(), 6)
+    val directions = arrayOf("Flat", "Rises north", "Rises east", "Rises south", "Rises west")
+    val directionValues = arrayOf(
+        NdsWalkSurfaceDirection.FLAT,
+        NdsWalkSurfaceDirection.NORTH,
+        NdsWalkSurfaceDirection.EAST,
+        NdsWalkSurfaceDirection.SOUTH,
+        NdsWalkSurfaceDirection.WEST,
+    )
+    val direction = JComboBox(directions)
+    direction.selectedIndex = directionValues.indexOf(existing?.riseDirection ?: NdsWalkSurfaceDirection.FLAT)
+    val low = JSpinner(SpinnerNumberModel(existing?.lowHeight ?: 0.0, -32.0, 32.0, 0.25))
+    val high = JSpinner(SpinnerNumberModel(existing?.highHeight ?: 1.0, -32.0, 32.0, 0.25))
+    low.editor = JSpinner.NumberEditor(low, "0.####")
+    high.editor = JSpinner.NumberEditor(high, "0.####")
+    fun updateHeightFields() { high.isEnabled = direction.selectedIndex != 0 }
+    direction.addActionListener { updateHeightFields() }
+    updateHeightFields()
+
+    val fields = JPanel(GridLayout(0, 2, 8, 4)).also {
+      it.add(JLabel("Start X")); it.add(startX)
+      it.add(JLabel("Start Z")); it.add(startZ)
+      it.add(JLabel("End X (inclusive)")); it.add(endX)
+      it.add(JLabel("End Z (inclusive)")); it.add(endZ)
+      it.add(JLabel("Shape")); it.add(direction)
+      it.add(JLabel("Low / flat height")); it.add(low)
+      it.add(JLabel("High height")); it.add(high)
+    }
+    val panel = JPanel(BorderLayout(0, 8)).also {
+      it.add(
+          JLabel("Coordinates are local map tiles (X 0-${map.grid.cols - 1}, Z 0-${map.grid.rows - 1})."),
+          BorderLayout.NORTH,
+      )
+      it.add(fields, BorderLayout.CENTER)
+    }
+    while (true) {
+      val result = JOptionPane.showConfirmDialog(
+          this,
+          panel,
+          if (existing == null) "Add Walk Surface" else "Edit Walk Surface",
+          JOptionPane.OK_CANCEL_OPTION,
+          JOptionPane.PLAIN_MESSAGE,
+      )
+      if (result != JOptionPane.OK_OPTION) return null
+      val x0 = startX.text.trim().toIntOrNull()
+      val z0 = startZ.text.trim().toIntOrNull()
+      val x1Inclusive = endX.text.trim().toIntOrNull()
+      val z1Inclusive = endZ.text.trim().toIntOrNull()
+      if (x0 == null || z0 == null || x1Inclusive == null || z1Inclusive == null) {
+        JOptionPane.showMessageDialog(
+            this, "All coordinates must be whole numbers.", "Invalid Walk Surface",
+            JOptionPane.ERROR_MESSAGE)
+        continue
+      }
+      if (x0 !in 0 until map.grid.cols || z0 !in 0 until map.grid.rows ||
+          x1Inclusive !in x0 until map.grid.cols || z1Inclusive !in z0 until map.grid.rows) {
+        JOptionPane.showMessageDialog(
+            this,
+            "Start and end must describe a non-empty rectangle inside the map.",
+            "Invalid Walk Surface",
+            JOptionPane.ERROR_MESSAGE,
+        )
+        continue
+      }
+      val selectedDirection = directionValues[direction.selectedIndex]
+      val lowHeight = (low.value as Number).toDouble()
+      val highHeight = if (selectedDirection == NdsWalkSurfaceDirection.FLAT) {
+        lowHeight
+      } else {
+        (high.value as Number).toDouble()
+      }
+      if (selectedDirection != NdsWalkSurfaceDirection.FLAT && highHeight <= lowHeight) {
+        JOptionPane.showMessageDialog(
+            this,
+            "High height must be greater than low height for a slope.",
+            "Invalid Walk Surface",
+            JOptionPane.ERROR_MESSAGE,
+        )
+        continue
+      }
+      return NdsWalkSurface.cardinal(
+          id = existing?.id ?: java.util.UUID.randomUUID().toString(),
+          minX = x0,
+          minZ = z0,
+          maxX = x1Inclusive + 1,
+          maxZ = z1Inclusive + 1,
+          lowHeight = lowHeight,
+          highHeight = highHeight,
+          riseDirection = selectedDirection,
+      )
+    }
+  }
+
+  private fun formatNdsHeight(value: Double): String =
+      java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
 
   private fun applyNdsVisibilityMode() {
     view()?.let {
@@ -866,6 +1721,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun updateNdsCursorCoordinates(cell: Pair<Int, Int>?) {
+    ndsCursorCell = cell
     ndsCursorCoordinates.text = if (cell == null) {
       "Cursor: X —, Z —"
     } else {
@@ -1261,6 +2117,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       if (impact.warpsRemoved > 0) add("${impact.warpsRemoved} warp(s)")
       if (impact.triggersRemoved > 0) add("${impact.triggersRemoved} trigger(s)")
       if (impact.bgEventsRemoved > 0) add("${impact.bgEventsRemoved} background event(s)")
+      if (impact.walkSurfacesRemoved > 0) add("${impact.walkSurfacesRemoved} walk surface(s)")
     }
     val warning = buildString {
       append("Crop ${map.displayName} to the selected ${w}x${h} tiles?\n\n")
@@ -1276,6 +2133,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
       if (impact.triggersClipped > 0) {
         append("\n${impact.triggersClipped} partially overlapping trigger(s) will be clipped.")
+      }
+      if (impact.walkSurfacesClipped > 0) {
+        append("\n${impact.walkSurfacesClipped} partially overlapping walk surface(s) will be clipped " +
+            "without changing their remaining slope.")
       }
       append("\n\nThis operation is saved immediately and cannot be undone.")
     }
@@ -1686,6 +2547,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     // History describes squares and props of the map it was recorded on, so it cannot carry over.
     ndsHistory.clear()
     ndsDragSceneBefore = null
+    ndsWalkPaintStart = null
+    ndsWalkPaintCurrent = null
+    ndsWalkPaintBefore = null
+    ndsWalkPaintErasing = false
+    ndsWalkPreview = null
     showMapCards(false)
     val v = view() ?: return
     v.grid = map.grid
@@ -1694,6 +2560,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.surfaceTriangles = tris
     v.modelTriangles = if (bld.isEmpty()) tris else tris + bld
     v.walkSurfaceTriangles = currentNdsWalkSurfaces()
+    v.walkSurfaceHandles = emptyList()
     v.modelTextures = ref.holder.project.texturesFor(map)
     v.modelPalettes = ref.holder.project.palettesFor(map)
     refreshNdsCustomTiles(ref.holder.project.texturesFor(map), ref.holder.project.palettesFor(map))
@@ -2803,6 +3670,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         handleNdsSurfacePick(hit, dragging)
         true
       }
+      8 -> {
+        handleNdsWalkSurfaceInteraction(map, hit, dragging)
+        true
+      }
       else -> false
     }
   }
@@ -2947,6 +3818,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   /** Enables the per-mode extras and drops selection state that no longer applies. */
   private fun onNdsPaintModeChanged() {
     val surfaceMode = ndsPaintMode.selectedIndex == 6
+    val walkMode = ndsPaintMode.selectedIndex == 8
     // The first four modes are the ones that write a square at a time.
     ndsTileBrushSpinner.isEnabled =
         ndsPaintMode.selectedIndex in 0..3 || ndsPaintMode.selectedIndex == 7
@@ -2961,6 +3833,17 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     // field rather than view(), which would build the GL canvas just to set a flag.
     ndsView?.surfacePicking = surfaceMode
     if (!surfaceMode && ndsSurfaceCells.isNotEmpty()) clearNdsSurfaceSelection()
+    if (!walkMode) {
+      if (ndsWalkPaintStart != null) clearNdsWalkPaintPreview()
+      selectedNdsWalkSurfaceId = null
+      clearNdsWalkTransform()
+      ndsView?.walkSurfaceHandles = emptyList()
+    }
+    if (walkMode && currentNdsMap?.isCustom == true) {
+      ndsWalkSurfaceCheck.isSelected = true
+      refreshNdsWalkSurfaces()
+    }
+    updateNdsWalkToolControls()
     if (surfaceMode) {
       status.text =
           "Pick Surface: click the map squares you want, then add them as a tile or prop " +
@@ -2977,6 +3860,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       status.text =
           "Paint Grass: drag to grow a connected HGSS field; edges are automatic; " +
               "Ctrl+drag removes grass"
+    } else if (walkMode) {
+      status.text = when (ndsWalkTool.selectedIndex) {
+        0 -> "Walk Surface / Flat: drag an area; Shift-click cyan to select; Ctrl+drag erases"
+        1 -> "Walk Surface / Slope: drag low to high; Shift-click cyan to select and edit"
+        else -> "Walk Surface / From prop: click stairs; Shift-click cyan to select and edit"
+      }
     }
   }
 
@@ -3039,7 +3928,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val choice = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex) ?: return
     // Paint Grass deliberately ignores the Tile combo and writes its internal field marker.
     // Choosing a tile is therefore an explicit request to go back to ordinary tile painting.
-    if (ndsPaintMode.selectedIndex == 7) ndsPaintMode.selectedIndex = 0
+    if (ndsPaintMode.selectedIndex == 7 || ndsPaintMode.selectedIndex == 8) {
+      ndsPaintMode.selectedIndex = 0
+    }
     val active = currentNdsHolder?.project
     if (choice.project == null || active == null || choice.project === active) {
       setNdsActiveTile(choice.index)
@@ -3536,6 +4427,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           props = current.props.map { if (it.id == beforeProp.id) beforeProp.copy() else it },
           removals = current.removals,
           transforms = current.transforms,
+          walkSurfaces = current.walkSurfaces,
           collision = current.collision,
       )
       ndsNumericTransformMap = map
@@ -3603,6 +4495,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     })
     component.addKeyListener(object : KeyAdapter() {
       override fun keyPressed(e: KeyEvent) {
+        if (e.keyCode == KeyEvent.VK_DELETE && ndsPaintMode.selectedIndex == 8 &&
+            selectedNdsWalkSurfaceId != null) {
+          deleteSelectedNdsWalkSurface()
+          e.consume()
+          return
+        }
         if (!e.isControlDown) return
         when (e.keyCode) {
           // Ctrl+Shift+Z redoes as well, which is what most editors answer to.
@@ -3622,6 +4520,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         2 -> "permission"
         3 -> "height"
         7 -> "grass"
+        8 -> "walk surface"
         else -> "tile"
       }
 
@@ -3689,9 +4588,15 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         selectedNdsPropIds.retainAll(map.props.map { it.id }.toSet())
         if (selectedNdsPropId !in selectedNdsPropIds) selectedNdsPropId = selectedNdsPropIds.lastOrNull()
         selectedNdsTerrainGroup = null
+        if (selectedNdsWalkSurfaceId != null &&
+            map.walkSurfaces.none { it.id == selectedNdsWalkSurfaceId }) {
+          selectedNdsWalkSurfaceId = null
+        }
         ndsPropsPanel.refreshProps(selectedNdsPropIds, selectedNdsPropId)
         // Textures too: a prop coming back needs the ones it was drawn with re-merged.
         refreshNdsPropGeometry(refreshTextures = true)
+        view()?.walkSurfaceTriangles = currentNdsWalkSurfaces()
+        refreshNdsWalkSurfaceHandles()
         status.text = "$verb ${step.label}"
       }
     }
