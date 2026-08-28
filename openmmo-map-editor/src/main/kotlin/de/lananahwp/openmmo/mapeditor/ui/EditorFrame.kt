@@ -328,6 +328,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var ndsSurfaceLastZ: Float? = null
   private var ndsSurfaceLastY: Float? = null
   private var ndsSurfaceErasing = false
+  private var ndsTilePickGesture = false
 
   /** Multi-selection plus the primary prop whose transform is shown in the sidebar. */
   private val selectedNdsPropIds = LinkedHashSet<String>()
@@ -662,6 +663,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         javax.swing.DefaultComboBoxModel(
             NdsTileset.tiles.map { it.name }.toTypedArray())
     ndsTileCombo.selectedIndex = 0
+    // Custom extraction names can be arbitrarily long. Let the popup show those names without
+    // letting the closed combo grow and push the Mode selector into a clipped toolbar row.
+    ndsTileCombo.preferredSize = Dimension(280, ndsTileCombo.preferredSize.height)
+    ndsTileCombo.toolTipText = "Select a built-in or extracted tile (Alt+click the map to pick one)"
     ndsTileCombo.addActionListener {
       selectNdsTileChoice()
     }
@@ -820,7 +825,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsSnapToGridCheck)
     terrainToolbar.add(ndsRestoreTerrainButton)
-    terrainToolbar.add(JLabel("  Middle drag rotates · Left click edits · Right drag pans · Wheel zooms"))
+    terrainToolbar.add(JLabel(
+        "  Middle drag rotates · Left click edits · Alt+click picks tile · Right drag pans · Wheel zooms"))
     val surfaceToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     surfaceToolbar.add(JLabel("Pick brush (squares):"))
     surfaceToolbar.add(ndsSurfaceBrushSpinner)
@@ -856,7 +862,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { x, z -> eraseNdsCell(x, z) },
             { ndsHistory.beginStroke(ndsStrokeLabel()) },
             { cell -> updateNdsCursorCoordinates(cell) },
-            { hit -> finishNdsWalkSurfacePaint(hit) },
+            { hit ->
+              ndsTilePickGesture = false
+              finishNdsWalkSurfacePaint(hit)
+            },
         )
     val created =
         try {
@@ -867,7 +876,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { x, z -> eraseNdsCell(x, z) },
               { ndsHistory.beginStroke(ndsStrokeLabel()) },
               { cell -> updateNdsCursorCoordinates(cell) },
-              { hit -> finishNdsWalkSurfacePaint(hit) },
+              { hit ->
+                ndsTilePickGesture = false
+                finishNdsWalkSurfacePaint(hit)
+              },
           )
         } catch (t: Throwable) {
           System.out.println("[Nds] OpenGL view unavailable (${t.message}); using software renderer")
@@ -3570,6 +3582,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun handleNdsCellInteraction(hit: NdsPointerHit, dragging: Boolean): Boolean {
     val map = currentNdsMap ?: return false
     return when (ndsPaintMode.selectedIndex) {
+      0 -> {
+        if (!dragging) ndsTilePickGesture = hit.altDown
+        if (ndsTilePickGesture) {
+          if (!dragging) pickNdsPaintedTile(hit.cellX, hit.cellZ)
+          true
+        } else false
+      }
       4 -> {
         if (!dragging) {
           // The drag that is about to start undoes as one step, measured from here.
@@ -3859,7 +3878,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               "(drag paints, Shift+drag boxes, Ctrl removes)"
     } else if (ndsPaintMode.selectedIndex == 0) {
       status.text =
-          "Tile: drag paints, Shift+drag paints only clear footprints, Ctrl+drag clears, " +
+          "Tile: drag paints, Alt+click picks a painted tile, Shift+drag uses clear footprints, " +
+              "Ctrl+drag clears, " +
               "Brush sets how many squares wide · Ctrl+Z undoes a stroke"
     } else if (ndsPaintMode.selectedIndex == 3) {
       status.text =
@@ -3915,7 +3935,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       ndsTileCombo.model = javax.swing.DefaultComboBoxModel(
           ndsTileChoices.map { it.label }.toTypedArray())
       val wanted = preferredId?.let { id ->
-        ndsTileChoices.indexOfFirst { it.index == id && it.project === active }
+        ndsTileChoices.indexOfFirst {
+          it.index == id && (it.project == null || it.project === active)
+        }
       }?.takeIf { it >= 0 } ?: previous?.takeIf { old ->
         old.project == null || old.project === active
       }?.let { old ->
@@ -3979,6 +4001,23 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.activeTileWidth = tile?.width ?: 1
     v.activeTileHeight = tile?.height ?: 1
     v.asComponent().repaint()
+  }
+
+  /** Alt+click eyedropper for built-in and project-local painted tiles. */
+  private fun pickNdsPaintedTile(x: Int?, z: Int?) {
+    val map = currentNdsMap ?: return
+    val project = currentNdsHolder?.project ?: return
+    if (x == null || z == null) return
+    val footprints = project.customTileStore.tiles()
+        .associate { it.index to (it.width to it.height) }
+    val hit = ndsPlacedTileAt(map.grid, x, z, footprints)
+    if (hit == null) {
+      status.text = "No painted tile found on that square"
+      return
+    }
+    refreshNdsTileCombo(hit.tile)
+    val label = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex)?.label ?: "tile #${hit.tile}"
+    status.text = "Picked $label from layer ${hit.layer}"
   }
 
   /**
@@ -4170,10 +4209,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             overlay = overlay.isSelected, requestedIndex = code)
         refreshNdsCustomTiles(holder.project.texturesFor(map), holder.project.palettesFor(map))
         refreshNdsTileCombo(tile.index)
-        ndsPaintMode.selectedIndex = 0
         status.text =
-            "Added ${tile.width}x${tile.height} tile '${tile.name}' as code ${tile.index} — " +
-                "selected and ready to paint"
+            "Added ${tile.width}x${tile.height} tile '${tile.name}' as code ${tile.index}; " +
+                "it is selected, and Pick Surface mode remains active"
         return
       } catch (t: Throwable) {
         JOptionPane.showMessageDialog(

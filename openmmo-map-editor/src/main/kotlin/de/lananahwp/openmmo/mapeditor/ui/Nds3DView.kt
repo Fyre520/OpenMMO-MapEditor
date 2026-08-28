@@ -37,6 +37,7 @@ data class NdsPointerHit(
     val surfaceTexture: String? = null,
     val shiftDown: Boolean = false,
     val ctrlDown: Boolean = false,
+    val altDown: Boolean = false,
     /** Pointer location retained for screen-space handle drags. */
     val screenX: Int? = null,
     val screenY: Int? = null,
@@ -567,6 +568,40 @@ internal fun ndsTilePlacementIsClear(
     }
   }
   return true
+}
+
+internal data class NdsPlacedTileHit(
+    val tile: Int,
+    val layer: Int,
+    val anchorX: Int,
+    val anchorZ: Int,
+)
+
+/** Topmost painted tile whose complete stamp footprint contains the clicked square. */
+internal fun ndsPlacedTileAt(
+    grid: NdsGrid,
+    x: Int,
+    z: Int,
+    tileFootprints: Map<Int, Pair<Int, Int>>,
+): NdsPlacedTileHit? {
+  if (x !in 0 until grid.cols || z !in 0 until grid.rows) return null
+  val maxWidth = tileFootprints.values.maxOfOrNull { it.first }?.coerceAtLeast(1) ?: 1
+  val maxHeight = tileFootprints.values.maxOfOrNull { it.second }?.coerceAtLeast(1) ?: 1
+  for (layer in NdsGrid.LAYERS - 1 downTo 0) {
+    val exact = grid.tileAt(layer, x, z)
+    if (exact >= 0) return NdsPlacedTileHit(exact, layer, x, z)
+    for (anchorX in x downTo (x - maxWidth + 1).coerceAtLeast(0)) {
+      for (anchorZ in z downTo (z - maxHeight + 1).coerceAtLeast(0)) {
+        val tile = grid.tileAt(layer, anchorX, anchorZ)
+        if (tile < 0) continue
+        val (width, height) = tileFootprints[tile] ?: (1 to 1)
+        if (x < anchorX + width.coerceAtLeast(1) && z < anchorZ + height.coerceAtLeast(1)) {
+          return NdsPlacedTileHit(tile, layer, anchorX, anchorZ)
+        }
+      }
+    }
+  }
+  return null
 }
 
 internal fun ndsTriangleOpacity(triangle: NdsTri, modelOpacity: Float, propOpacity: Float): Float =

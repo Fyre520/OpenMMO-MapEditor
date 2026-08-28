@@ -63,7 +63,9 @@ a reusable external NSBMD/NSBTX prop model. Selecting a catalog entry shows a te
 middle-drag it to rotate and use the wheel to zoom. Prop edits persist in the map's `props.json` override.
 
 In Tile mode, hold **Shift** while painting to place a tile only when its complete footprint is
-clear on every painted layer. This also prevents multi-square custom tiles from overlapping.
+clear on every painted layer. This also prevents multi-square custom tiles from overlapping. Use
+**Alt+Click** as an eyedropper to select the topmost painted tile under the pointer. Creating a tile
+from a surface selection leaves the editor in surface-picking mode so more tiles can be extracted.
 
 The ROM catalog uses inspected names and functional categories for both HGSS and Platinum while
 keeping the original numeric ID beside every entry. Use the search box to filter by a name such as

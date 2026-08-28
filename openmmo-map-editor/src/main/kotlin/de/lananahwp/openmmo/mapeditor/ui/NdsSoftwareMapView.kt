@@ -221,6 +221,7 @@ class NdsSoftwareMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = true)?.copy(
                       shiftDown = e.isShiftDown,
                       ctrlDown = e.isControlDown,
+                      altDown = e.isAltDown,
                   )
               if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
@@ -270,7 +271,11 @@ class NdsSoftwareMapView(
               // selection across it needs the tile under the geometry, not under the ground plane.
               val hit =
                   if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
-                  else pointerHit(e.x, e.y, includeModelGroup = false)
+                  else pointerHit(e.x, e.y, includeModelGroup = false)?.copy(
+                      shiftDown = e.isShiftDown,
+                      ctrlDown = e.isControlDown,
+                      altDown = e.isAltDown,
+                  )
               if (hit != null &&
                   !onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
                 paint(hit.cellX, hit.cellZ, e.isControlDown, e.isShiftDown)

@@ -59,6 +59,17 @@ class NdsBrushFootprintTest {
   }
 
   @Test
+  fun `tile eyedropper finds top layer and multi-square stamp interiors`() {
+    val grid = NdsGrid(8, 8)
+    grid.setTile(1, 2, 2, 1000)
+    val footprints = mapOf(1000 to (3 to 2))
+
+    assertEquals(NdsPlacedTileHit(1000, 1, 2, 2), ndsPlacedTileAt(grid, 4, 3, footprints))
+    grid.setTile(3, 4, 3, 7)
+    assertEquals(NdsPlacedTileHit(7, 3, 4, 3), ndsPlacedTileAt(grid, 4, 3, footprints))
+  }
+
+  @Test
   fun `cursor height follows terrain tile elevation and tile shape`() {
     val grid = NdsGrid(4, 4)
     grid.setTile(0, 1, 2, NdsTileset.tiles.indexOfFirst { it.name == "Wall" })
