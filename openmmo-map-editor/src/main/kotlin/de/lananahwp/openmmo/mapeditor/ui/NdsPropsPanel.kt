@@ -44,7 +44,7 @@ class NdsPropsPanel(
   private val catalog = JComboBox<NdsProject.PropModelInfo>()
   private val showAllNdsProps = JCheckBox("Show all NDS props")
   private val catalogCategory = JLabel(" ")
-  private val preview = NdsSoftwareMapView({ _, _ -> }, { _, _, _ -> }).apply {
+  private val preview = NdsSoftwareMapView({ _, _, _ -> }, { _, _, _ -> }).apply {
     grid = NdsGrid(0, 0)
     showGrid = false
     preferredSize = Dimension(260, 180)
@@ -62,6 +62,8 @@ class NdsPropsPanel(
   private val sy = decimalSpinner(1.0, 0.001, 10000.0, 0.05)
   private val sz = decimalSpinner(1.0, 0.001, 10000.0, 0.05)
   private val linkScale = JCheckBox("Link scale XYZ", false)
+  private val mirrorX = JCheckBox("Mirror X", false)
+  private val mirrorZ = JCheckBox("Mirror Z", false)
   private val mergeButton = JButton("Merge Prop")
   private var map: NdsMap? = null
   private var propIds = emptyList<String>()
@@ -132,6 +134,7 @@ class NdsPropsPanel(
     row("Position", x, y, z)
     row("Rotation", rx, ry, rz)
     row("Scale", sx, sy, sz)
+    transforms.add(JLabel("Mirror")); transforms.add(mirrorX); transforms.add(JLabel("")); transforms.add(mirrorZ)
     transforms.add(linkScale); transforms.add(JLabel("")); transforms.add(JLabel("")); transforms.add(JLabel(""))
     val bottom = JPanel(BorderLayout(4, 4)).also {
       it.border = BorderFactory.createTitledBorder("Selected transform")
@@ -154,6 +157,8 @@ class NdsPropsPanel(
     linkScale.addActionListener {
       if (linkScale.isSelected && !syncing) applyScale(sx)
     }
+    mirrorX.addActionListener { applyTransform() }
+    mirrorZ.addActionListener { applyTransform() }
     setTransformEnabled(false)
   }
 
@@ -233,6 +238,7 @@ class NdsPropsPanel(
       x.value = prop.x.toDouble(); y.value = prop.y.toDouble(); z.value = prop.z.toDouble()
       rx.value = prop.rotationX.toDouble(); ry.value = prop.rotationY.toDouble(); rz.value = prop.rotationZ.toDouble()
       sx.value = prop.scaleX.toDouble(); sy.value = prop.scaleY.toDouble(); sz.value = prop.scaleZ.toDouble()
+      mirrorX.isSelected = prop.mirrorX; mirrorZ.isSelected = prop.mirrorZ
     }
     syncing = false
     setTransformEnabled(prop != null)
@@ -261,6 +267,7 @@ class NdsPropsPanel(
     prop.x = number(x); prop.y = number(y); prop.z = number(z)
     prop.rotationX = number(rx); prop.rotationY = number(ry); prop.rotationZ = number(rz)
     prop.scaleX = number(sx); prop.scaleY = number(sy); prop.scaleZ = number(sz)
+    prop.mirrorX = mirrorX.isSelected; prop.mirrorZ = mirrorZ.isSelected
     val index = propIds.indexOf(prop.id)
     if (index >= 0) listModel[index] = label(index, prop)
     onChanged(before)
@@ -303,6 +310,8 @@ class NdsPropsPanel(
   private fun setTransformEnabled(enabled: Boolean) {
     listOf(x, y, z, rx, ry, rz, sx, sy, sz).forEach { it.isEnabled = enabled }
     linkScale.isEnabled = enabled
+    mirrorX.isEnabled = enabled
+    mirrorZ.isEnabled = enabled
     mergeButton.isEnabled = selectedIds.size >= 2
   }
 

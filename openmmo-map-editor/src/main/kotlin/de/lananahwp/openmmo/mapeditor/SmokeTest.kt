@@ -487,7 +487,7 @@ fun main(args: Array<String>) {
 
       // Render the populated Platinum map through the 3D view.
       val view =
-          de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _ -> }, { _, _, _ -> })
+          de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _, _ -> }, { _, _, _ -> })
       view.grid = map.grid
       view.setSize(320, 240)
       val img = BufferedImage(320, 240, BufferedImage.TYPE_INT_ARGB)
@@ -524,7 +524,7 @@ fun main(args: Array<String>) {
   // 9. DS 3D view renders grid pixels offscreen.
   run {
     val view =
-        de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _ -> }, { _, _, _ -> })
+        de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _, _ -> }, { _, _, _ -> })
     val g = de.lananahwp.openmmo.mapeditor.model.NdsGrid()
     g.setTile(0, 8, 8, 0)
     g.setPermission(4, 4, 0x10)
@@ -581,7 +581,7 @@ fun main(args: Array<String>) {
         }
         if (any == 0) continue
         val view =
-            de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _ -> }, { _, _, _ -> })
+            de.lananahwp.openmmo.mapeditor.ui.NdsSoftwareMapView({ _, _, _ -> }, { _, _, _ -> })
         view.grid = m.grid
         view.modelTriangles = p.trianglesFor(m)
         view.setSize(320, 240)

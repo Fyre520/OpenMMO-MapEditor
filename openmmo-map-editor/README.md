@@ -56,16 +56,21 @@ and remain project-local so the same override is restored when the project is re
 
 The **Props** panel beside the DS viewport exposes the map's original ROM buildings as editable
 instances. Select one in the list or switch to **Select Object / Move Prop** and click it in the viewport;
-drag to move, use the transform controls for precise position/rotation/scale, duplicate it, or press
-Delete to remove it. Choose a ROM prop from the catalog and click **Place at center**, then drag the
+drag to move, use the transform controls for precise position/rotation/scale or local X/Z mirroring,
+duplicate it, or press Delete to remove it. Choose a ROM prop from the catalog and click **Place at center**, then drag the
 selected instance into position; or use **Import** to add
 a reusable external NSBMD/NSBTX prop model. Selecting a catalog entry shows a textured preview;
 middle-drag it to rotate and use the wheel to zoom. Prop edits persist in the map's `props.json` override.
+
+In Tile mode, hold **Shift** while painting to place a tile only when its complete footprint is
+clear on every painted layer. This also prevents multi-square custom tiles from overlapping.
 
 The ROM catalog uses inspected names and functional categories for both HGSS and Platinum while
 keeping the original numeric ID beside every entry. Use the search box to filter by a name such as
 `tree` or `bridge`, by a category such as `furniture`, or directly by ROM number. Platinum's
 Underground traps, treasures, statues, and helper models are identified separately from map scenery.
+With both projects open, **Show all NDS props** also lists extracted and merged props from the other
+project; placing one copies its self-contained mesh and textures into the active project.
 
 Choose **Remove Scenery Object** and click the visible object to remove trees, rocks, fences, and
 similar scenery. The mode handles both placed ROM props and objects baked into the terrain model.

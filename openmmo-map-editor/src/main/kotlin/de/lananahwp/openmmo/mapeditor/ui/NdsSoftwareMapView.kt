@@ -27,11 +27,11 @@ data class NdsEventMarker(val x: Int, val z: Int, val label: String, val color: 
 /**
  * Software-rendered 3D view of a DS map grid (no OpenGL required).
  *
- * Interaction mirrors a GL editor: left-click paints the active tile onto the active layer,
- * shift + drag orbits the camera, right drag pans, and the mouse wheel zooms.
+ * Interaction mirrors a GL editor: left-click paints, Shift prevents tile-footprint overlap,
+ * middle-drag orbits, right-drag pans, and the mouse wheel zooms.
  */
 class NdsSoftwareMapView(
-    private val onPaintCell: (x: Int, z: Int) -> Unit,
+    private val onPaintCell: (x: Int, z: Int, emptyOnly: Boolean) -> Unit,
     private val onPaintCollision: (x: Int, z: Int, value: Int) -> Unit,
     private val onCellInteraction: (hit: NdsPointerHit, dragging: Boolean) -> Boolean = { _, _ -> false },
     /** Ctrl+click/drag in a paint mode: clear this cell rather than paint the active brush into it. */
@@ -225,7 +225,7 @@ class NdsSoftwareMapView(
               if (hit == null) return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
                 onStrokeBegin()
-                paint(hit.cellX, hit.cellZ, e.isControlDown)
+                paint(hit.cellX, hit.cellZ, e.isControlDown, e.isShiftDown)
               }
             }
           }
@@ -273,7 +273,7 @@ class NdsSoftwareMapView(
                   else pointerHit(e.x, e.y, includeModelGroup = false)
               if (hit != null &&
                   !onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ, e.isControlDown)
+                paint(hit.cellX, hit.cellZ, e.isControlDown, e.isShiftDown)
               }
             }
             updateHoverCell(e.x, e.y)
@@ -300,14 +300,14 @@ class NdsSoftwareMapView(
     repaint()
   }
 
-  private fun paint(x: Int, z: Int, erase: Boolean) {
+  private fun paint(x: Int, z: Int, erase: Boolean, emptyOnly: Boolean) {
     when (paintMode) {
       // Ctrl is the erase modifier for the two modes that write a cell's own contents: it takes
       // the tile back out of the square, or drops its height back to the map floor.
-      PaintMode.TILE -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.TILE -> if (erase) onEraseCell(x, z) else onPaintCell(x, z, emptyOnly)
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
-      PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z, emptyOnly)
       PaintMode.WALK_SURFACE -> Unit
       PaintMode.NONE -> Unit
     }

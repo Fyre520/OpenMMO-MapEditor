@@ -342,6 +342,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private var ndsTerrainDragInitialOffsetZ = 0f
   private val ndsPropLibraries = HashMap<de.lananahwp.openmmo.mapeditor.core.NdsFamily, NdsPropLibrary>()
   private val ndsPropLibrariesLoading = HashSet<de.lananahwp.openmmo.mapeditor.core.NdsFamily>()
+  /** Catalog identity -> open project supplying an extracted/merged prop not yet copied locally. */
+  private val ndsExternalPropSources = HashMap<String, NdsProject>()
   private var showAllNdsProps = false
   private var ndsNumericTransformBefore: NdsSceneSnapshot? = null
   private var ndsNumericTransformMap: NdsMap? = null
@@ -848,7 +850,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     if (existing != null) return existing
     val software =
         NdsSoftwareMapView(
-            { x, z -> paintNdsCell(x, z) },
+            { x, z, emptyOnly -> paintNdsCell(x, z, emptyOnly) },
             { x, z, value -> paintNdsCollision(x, z, value) },
             { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
             { x, z -> eraseNdsCell(x, z) },
@@ -859,7 +861,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val created =
         try {
           NdsGlMapView(
-              { x, z -> paintNdsCell(x, z) },
+              { x, z, emptyOnly -> paintNdsCell(x, z, emptyOnly) },
               { x, z, value -> paintNdsCollision(x, z, value) },
               { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
               { x, z -> eraseNdsCell(x, z) },
@@ -3857,7 +3859,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               "(drag paints, Shift+drag boxes, Ctrl removes)"
     } else if (ndsPaintMode.selectedIndex == 0) {
       status.text =
-          "Tile: drag paints the selected tile, Ctrl+drag clears the square, " +
+          "Tile: drag paints, Shift+drag paints only clear footprints, Ctrl+drag clears, " +
               "Brush sets how many squares wide · Ctrl+Z undoes a stroke"
     } else if (ndsPaintMode.selectedIndex == 3) {
       status.text =
@@ -4301,6 +4303,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   private fun previewNdsProp(info: NdsProject.PropModelInfo): NdsProject.PropModelPreview {
     val current = currentNdsHolder?.project
+    ndsExternalPropSources[info.catalogId]?.let { source ->
+      return source.propModelPreview(info.sourceModelKey, null)
+    }
+    if (current?.customPropModels()?.any { it.key == info.key } == true) {
+      return current.propModelPreview(info.key, currentNdsMap)
+    }
     val foreign = info.sourceFamily?.takeIf { current != null && it != current.family }
     return if (foreign == null) {
       current?.propModelPreview(info.sourceModelKey, currentNdsMap)
@@ -4316,8 +4324,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
 
   private fun rebuildNdsPropCatalog() {
     val current = currentNdsHolder?.project ?: return
+    ndsExternalPropSources.clear()
     val models = current.propModels().toMutableList()
     if (showAllNdsProps) {
+      val installedProjectProps = current.customPropModels()
+          .mapNotNull { model ->
+            val family = model.sourceFamily ?: return@mapNotNull null
+            family to model.sourceModelKey
+          }
+          .toSet()
+      for (source in ndsHolders.values.map { it.project }.distinct().filter { it !== current }) {
+        for (model in source.transferableCustomPropModels()) {
+          if ((source.family to model.key) in installedProjectProps) continue
+          val catalogId = "project:${source.family.name}:${source.rootDir.canonicalPath}:${model.key}"
+          val external = model.copy(
+              catalogId = catalogId,
+              sourceFamily = source.family,
+              sourceModelKey = model.key,
+          )
+          models += external
+          ndsExternalPropSources[catalogId] = source
+        }
+      }
       val otherFamily = de.lananahwp.openmmo.mapeditor.core.NdsFamily.entries
           .firstOrNull { it != current.family }
       val source = ndsHolders.values.map { it.project }
@@ -4360,8 +4388,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val map = currentNdsMap ?: return
       val holder = currentNdsHolder ?: return
       try {
+        val sourceProject = ndsExternalPropSources[info.catalogId]
         val foreign = info.sourceFamily?.takeIf { it != holder.project.family }
-        val modelKey = if (foreign == null) {
+        var copiedFromProject = false
+        val localCustom = holder.project.customPropModels().any { it.key == info.key }
+        val modelKey = if (sourceProject != null) {
+          val snapshot = sourceProject.transferableCustomPropSnapshot(info.sourceModelKey)
+              ?: error("The source project prop ${info.label} could not be read")
+          copiedFromProject = true
+          holder.project.installForeignProp(info, snapshot).key
+        } else if (localCustom) {
+          info.key
+        } else if (foreign == null) {
           info.sourceModelKey
         } else {
           val library = ndsPropLibraries[foreign]
@@ -4388,7 +4426,11 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
         ndsPaintMode.selectedIndex = 4
         refreshNdsPropGeometry(refreshTextures = true)
         markDirty()
-        status.text = "Placed ${info.label} at the map center - drag it to move"
+        status.text = if (copiedFromProject) {
+          "Copied ${info.label} into ${holder.project.family.displayName} props and placed it at the map center"
+        } else {
+          "Placed ${info.label} at the map center - drag it to move"
+        }
       } catch (t: Throwable) {
         JOptionPane.showMessageDialog(
             this, t.message ?: t.toString(), "Place prop failed", JOptionPane.ERROR_MESSAGE)
@@ -4725,7 +4767,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     return cells.filter { (cx, cz) -> cx in 0 until grid.cols && cz in 0 until grid.rows }
   }
 
-  private fun paintNdsCell(x: Int, z: Int) {
+  private fun paintNdsCell(x: Int, z: Int, emptyOnly: Boolean = false) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     if (ndsPaintMode.selectedIndex == 7) {
@@ -4737,6 +4779,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val tileStore = currentNdsHolder?.project?.customTileStore
     val storedTiles = if (height) emptyList() else tileStore?.tiles().orEmpty()
     val stamp = storedTiles.firstOrNull { it.index == view.activeTile }
+    val tileFootprints = storedTiles.associate { it.index to (it.width to it.height) }
     val overlayIds = storedTiles.filter { it.overlay }.map { it.index }.toSet()
     var painted = 0
     var overlayFull = false
@@ -4749,6 +4792,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       } else {
         if (stamp != null &&
             (cx + stamp.width > map.grid.cols || cz + stamp.height > map.grid.rows)) continue
+        if (emptyOnly && !ndsTilePlacementIsClear(
+                map.grid, cx, cz, stamp?.width ?: 1, stamp?.height ?: 1, tileFootprints)) {
+          continue
+        }
         val targetLayer = if (stamp?.overlay == true) {
           // Repainting an overlay cell replaces its existing detail instead of building an
           // invisible stack every time the brush crosses that square.
@@ -4778,11 +4825,13 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
       painted++
     }
-    if (!height && painted == 0 && stamp != null) {
-      status.text = if (overlayFull) {
+    if (!height && painted == 0 && (stamp != null || emptyOnly)) {
+      status.text = if (emptyOnly) {
+        "Shift paint skipped: that tile footprint overlaps an existing painted tile"
+      } else if (overlayFull) {
         "No free overlay layer is available on that square"
       } else {
-        "${stamp.width}x${stamp.height} tile does not fit at that map edge"
+        "${stamp?.width ?: 1}x${stamp?.height ?: 1} tile does not fit at that map edge"
       }
       return
     }

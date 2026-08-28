@@ -97,7 +97,7 @@ private fun renderPreview(
     height: Int,
     yaw: Double,
 ): BufferedImage {
-  val view = NdsSoftwareMapView({ _, _ -> }, { _, _, _ -> }).apply {
+  val view = NdsSoftwareMapView({ _, _, _ -> }, { _, _, _ -> }).apply {
     grid = NdsGrid(0, 0)
     showGrid = false
     showCollision = false

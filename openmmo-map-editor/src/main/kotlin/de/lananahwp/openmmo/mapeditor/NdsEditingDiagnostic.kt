@@ -103,7 +103,7 @@ fun main(args: Array<String>) {
             pickView, -1f, ys.min(), previewMap.grid.rows / 2f)!!
         val pointerEvents = mutableListOf<Pair<NdsPointerHit, Boolean>>()
         val interactionView = NdsSoftwareMapView(
-            { _, _ -> }, { _, _, _ -> }, { hit, dragging ->
+            { _, _, _ -> }, { _, _, _ -> }, { hit, dragging ->
               pointerEvents += hit to dragging
               true
             }).apply {

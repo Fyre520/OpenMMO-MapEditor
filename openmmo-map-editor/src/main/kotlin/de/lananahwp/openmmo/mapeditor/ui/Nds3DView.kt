@@ -533,6 +533,42 @@ internal fun ndsOverlayLayer(
   return null
 }
 
+/** True when a tile stamp would not intersect any painted tile footprint on any layer. */
+internal fun ndsTilePlacementIsClear(
+    grid: NdsGrid,
+    x: Int,
+    z: Int,
+    width: Int,
+    height: Int,
+    tileFootprints: Map<Int, Pair<Int, Int>>,
+): Boolean {
+  val candidateWidth = width.coerceAtLeast(1)
+  val candidateHeight = height.coerceAtLeast(1)
+  if (x < 0 || z < 0 || x + candidateWidth > grid.cols || z + candidateHeight > grid.rows) {
+    return false
+  }
+  val candidateMaxX = x + candidateWidth
+  val candidateMaxZ = z + candidateHeight
+  val maxExistingWidth = tileFootprints.values.maxOfOrNull { it.first }?.coerceAtLeast(1) ?: 1
+  val maxExistingHeight = tileFootprints.values.maxOfOrNull { it.second }?.coerceAtLeast(1) ?: 1
+  val anchorMinX = (x - maxExistingWidth + 1).coerceAtLeast(0)
+  val anchorMinZ = (z - maxExistingHeight + 1).coerceAtLeast(0)
+  val anchorMaxX = candidateMaxX.coerceAtMost(grid.cols)
+  val anchorMaxZ = candidateMaxZ.coerceAtMost(grid.rows)
+  for (layer in 0 until NdsGrid.LAYERS) {
+    for (existingX in anchorMinX until anchorMaxX) for (existingZ in anchorMinZ until anchorMaxZ) {
+      val tile = grid.tileAt(layer, existingX, existingZ)
+      if (tile < 0) continue
+      val (existingWidth, existingHeight) = tileFootprints[tile] ?: (1 to 1)
+      val intersects =
+          x < existingX + existingWidth.coerceAtLeast(1) && candidateMaxX > existingX &&
+              z < existingZ + existingHeight.coerceAtLeast(1) && candidateMaxZ > existingZ
+      if (intersects) return false
+    }
+  }
+  return true
+}
+
 internal fun ndsTriangleOpacity(triangle: NdsTri, modelOpacity: Float, propOpacity: Float): Float =
     (modelOpacity * if (triangle.editGroup.startsWith("prop:")) propOpacity else 1f)
         .coerceIn(0f, 1f)

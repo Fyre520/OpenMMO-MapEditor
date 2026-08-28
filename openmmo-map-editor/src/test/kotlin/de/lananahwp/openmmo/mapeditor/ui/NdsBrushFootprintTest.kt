@@ -5,6 +5,8 @@ import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class NdsBrushFootprintTest {
   @Test
@@ -43,6 +45,17 @@ class NdsBrushFootprintTest {
         ndsTileStampFootprint(4, 9, brushSize = 1, tileWidth = 3, tileHeight = 2,
             cols = 20, rows = 20).toSet(),
     )
+  }
+
+  @Test
+  fun `empty-only placement rejects intersecting tile footprints on every layer`() {
+    val grid = NdsGrid(8, 8)
+    grid.setTile(3, 2, 2, 1000)
+    val footprints = mapOf(1000 to (2 to 2))
+
+    assertFalse(ndsTilePlacementIsClear(grid, 3, 1, 2, 2, footprints))
+    assertFalse(ndsTilePlacementIsClear(grid, 1, 3, 2, 2, footprints))
+    assertTrue(ndsTilePlacementIsClear(grid, 4, 2, 2, 2, footprints))
   }
 
   @Test

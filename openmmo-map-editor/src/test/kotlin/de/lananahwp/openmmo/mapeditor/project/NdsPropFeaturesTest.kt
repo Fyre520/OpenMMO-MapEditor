@@ -15,6 +15,35 @@ import kotlin.test.assertTrue
 
 class NdsPropFeaturesTest {
   @Test
+  fun `prop mirrors in local X and Z and persists the toggles`() {
+    val root = Files.createTempDirectory("nds-mirrored-prop").toFile()
+    try {
+      val project = NdsProject(root)
+      val model = project.saveExtractedProp(
+          "Asymmetric", NdsMeshSnapshot(listOf(unitTriangle()), emptyMap(), emptyMap()), "TEST")
+      val map = project.createMap("MAP_MIRROR_TEST", "Mirror Test", 902, 1, 1)
+      val prop = project.createProp(model.key, 5f, 7f).copy(
+          id = "mirrored", mirrorX = true, mirrorZ = true)
+      map.props += prop
+
+      val triangle = project.buildingTrianglesFor(map).single()
+      assertEquals(5f, triangle.ax)
+      assertEquals(4f, triangle.bx)
+      assertEquals(7f, triangle.az)
+      assertEquals(6f, triangle.cz)
+
+      project.saveProps(map)
+      val reloaded = assertNotNull(NdsProject(root).loadMap(map.name)).props.single()
+      assertTrue(reloaded.mirrorX)
+      assertTrue(reloaded.mirrorZ)
+      assertEquals(prop.scaleX, reloaded.scaleX)
+      assertEquals(prop.scaleZ, reloaded.scaleZ)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
   fun `merged prop preserves relative placement and reloads as a mesh catalog entry`() {
     val root = Files.createTempDirectory("nds-merged-prop").toFile()
     try {
@@ -72,6 +101,35 @@ class NdsPropFeaturesTest {
       assertEquals(1, project.propModelPreview(first.key, null).triangles.size)
     } finally {
       root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `extracted prop can be copied between projects with a stable local key`() {
+    val sourceRoot = Files.createTempDirectory("nds-source-extracted-prop").toFile()
+    val targetRoot = Files.createTempDirectory("nds-target-extracted-prop").toFile()
+    try {
+      val source = NdsProject(sourceRoot)
+      val saved = source.saveExtractedProp(
+          "Veilstone stair", NdsMeshSnapshot(listOf(unitTriangle()), emptyMap(), emptyMap()),
+          "MAP_HEADER_VEILSTONE_CITY")
+      val transferable = source.transferableCustomPropModels().single { it.key == saved.key }
+          .copy(sourceFamily = NdsFamily.PLATINUM, sourceModelKey = saved.key)
+      val snapshot = assertNotNull(source.transferableCustomPropSnapshot(saved.key))
+
+      val target = NdsProject(targetRoot)
+      val first = target.installForeignProp(transferable, snapshot)
+      val second = target.installForeignProp(transferable, snapshot)
+
+      assertEquals("foreign:platinum:extracted:veilstone_stair", first.key)
+      assertEquals(first.key, second.key)
+      val reloaded = NdsProject(targetRoot).customPropModels().single()
+      assertEquals(NdsFamily.PLATINUM, reloaded.sourceFamily)
+      assertEquals(saved.key, reloaded.sourceModelKey)
+      assertEquals(1, NdsProject(targetRoot).propModelPreview(first.key, null).triangles.size)
+    } finally {
+      sourceRoot.deleteRecursively()
+      targetRoot.deleteRecursively()
     }
   }
 

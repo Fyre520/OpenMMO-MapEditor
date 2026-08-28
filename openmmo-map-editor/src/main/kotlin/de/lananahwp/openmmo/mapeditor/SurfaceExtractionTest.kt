@@ -305,7 +305,7 @@ private fun testCtrlErasesAPaintedSquare() {
   val painted = mutableListOf<Pair<Int, Int>>()
   val erased = mutableListOf<Pair<Int, Int>>()
   val view = NdsSoftwareMapView(
-      { x, z ->
+      { x, z, _ ->
         painted += x to z
         grid.setTile(0, x, z, 5)
       },

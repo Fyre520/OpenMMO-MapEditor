@@ -1566,16 +1566,17 @@ class NdsProject(
       sourceMap: String,
   ): PropModelInfo = saveMeshProp(label, snapshot, "merged", "Merged", "merged", sourceMap)
 
-  /** Installs a foreign-family ROM model locally so maps do not depend on the other ROM later. */
+  /** Installs a foreign ROM or self-contained project prop so maps never depend on its source. */
   fun installForeignProp(
       info: PropModelInfo,
       snapshot: de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot,
   ): PropModelInfo {
     val sourceFamily = requireNotNull(info.sourceFamily) { "Foreign prop has no source family" }
-    val sourceId = info.sourceModelKey.removePrefix("rom:")
+    val romModel = info.sourceModelKey.startsWith("rom:")
+    val sourceId = if (romModel) info.sourceModelKey.removePrefix("rom:") else info.sourceModelKey
     val key = "foreign:${sourceFamily.name.lowercase()}:$sourceId"
     return saveMeshProp(
-        info.label, snapshot, "foreign-rom",
+        info.label, snapshot, if (romModel) "foreign-rom" else "foreign-project",
         "${info.category} - ${sourceFamily.displayName}", "foreign", null,
         fixedKey = key,
         extra = linkedMapOf(
@@ -2056,7 +2057,9 @@ class NdsProject(
     val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
     for (tri in propModelTriangles(prop.modelKey)) {
         fun transform(x: Float, y: Float, z: Float): FloatArray {
-          var px = x.toDouble(); var py = y.toDouble(); var pz = z.toDouble()
+          var px = (if (prop.mirrorX) -x else x).toDouble()
+          var py = y.toDouble()
+          var pz = (if (prop.mirrorZ) -z else z).toDouble()
           var c = kotlin.math.cos(Math.toRadians(prop.rotationX.toDouble()))
           var s = kotlin.math.sin(Math.toRadians(prop.rotationX.toDouble()))
           val y1 = py * c - pz * s; val z1 = py * s + pz * c; py = y1; pz = z1
@@ -2510,6 +2513,14 @@ class NdsProject(
         }
         ?.sortedBy { it.label.lowercase() }
         .orEmpty()
+
+  /** Project props whose decoded mesh and textures can be copied without their source project. */
+  fun transferableCustomPropModels(): List<PropModelInfo> =
+      customPropModels().filter { propMeshFile(it.key).isFile }
+
+  /** Loads the self-contained payload used to copy an extracted or merged prop to another project. */
+  fun transferableCustomPropSnapshot(modelKey: String): de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot? =
+      meshSnapshot(modelKey)
 
   /** ROM building models plus reusable models imported into this project. */
   fun propModels(): List<PropModelInfo> {
@@ -3100,6 +3111,8 @@ class NdsProject(
         scaleX = (o.double("scaleX") ?: 1.0).toFloat(),
         scaleY = (o.double("scaleY") ?: 1.0).toFloat(),
         scaleZ = (o.double("scaleZ") ?: 1.0).toFloat(),
+        mirrorX = o.get("mirrorX")?.asBool() ?: false,
+        mirrorZ = o.get("mirrorZ")?.asBool() ?: false,
     )
   }
 
@@ -3116,6 +3129,8 @@ class NdsProject(
           "scaleX" to Json.JNum(p.scaleX.toDouble()),
           "scaleY" to Json.JNum(p.scaleY.toDouble()),
           "scaleZ" to Json.JNum(p.scaleZ.toDouble()),
+          "mirrorX" to Json.JBool(p.mirrorX),
+          "mirrorZ" to Json.JBool(p.mirrorZ),
       ))
 
   private fun populatePropsFromRom(map: NdsMap) {

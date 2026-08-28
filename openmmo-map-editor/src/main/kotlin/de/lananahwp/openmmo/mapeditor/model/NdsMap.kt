@@ -142,6 +142,10 @@ data class NdsProp(
     var scaleX: Float = 1f,
     var scaleY: Float = 1f,
     var scaleZ: Float = 1f,
+    /** Reflects the model in its local X axis before rotation. */
+    var mirrorX: Boolean = false,
+    /** Reflects the model in its local Z axis before rotation. */
+    var mirrorZ: Boolean = false,
 )
 
 data class NdsCollisionRestore(
