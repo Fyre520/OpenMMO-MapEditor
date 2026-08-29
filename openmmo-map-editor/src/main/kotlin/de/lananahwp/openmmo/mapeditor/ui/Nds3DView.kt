@@ -254,7 +254,7 @@ interface Nds3DView {
   var modelOpacity: Float
   var activeLayer: Int
   var activeTile: Int
-  var activeHeight: Int
+  var activeHeight: Double
   var brushCollision: Int
   var showGrid: Boolean
   var showCollision: Boolean
