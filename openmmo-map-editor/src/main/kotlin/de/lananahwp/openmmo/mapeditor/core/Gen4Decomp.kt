@@ -127,6 +127,18 @@ class Gen4Decomp(val rootDir: File) {
     fun int(): Int? =
         if (value.startsWith("0x", ignoreCase = true)) value.substring(2).toIntOrNull(16)
         else value.toIntOrNull()
+    fun mapType(): Int? =
+        int()
+            ?: when (value) {
+              "MAP_TYPE_INVALID" -> 0
+              "MAP_TYPE_CITY_TOWN" -> 1
+              "MAP_TYPE_ROUTE" -> 2
+              "MAP_TYPE_CAVE" -> 3
+              "MAP_TYPE_INTERIOR" -> 4
+              "MAP_TYPE_POKEMON_CENTER" -> 5
+              "MAP_TYPE_UNDERGROUND" -> 6
+              else -> null
+            }
     fun bankName(): String = value.substringAfterLast('_').trim()
     // Extracts the numeric id from names like `map_matrix_0074` / `map_matrix_000` /
     // `NARC_map_matrix_map_matrix_0074_UNION_bin` -> 74.
@@ -154,7 +166,7 @@ class Gen4Decomp(val rootDir: File) {
       "momCallIntroParam" -> int()?.let { h.momCallIntroParam = it }
       "regionNo" -> h.regionNo = value
       "weather" -> int()?.let { h.weather = it }
-      "mapType" -> int()?.let { h.mapType = it }
+      "mapType" -> mapType()?.let { h.mapType = it }
       "cameraType" -> int()?.let { h.cameraType = it }
       "followMode" -> h.followMode = value
       "battleBg" -> h.battleBg = value

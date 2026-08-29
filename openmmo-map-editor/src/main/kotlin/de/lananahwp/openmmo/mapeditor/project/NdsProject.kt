@@ -1617,6 +1617,11 @@ class NdsProject(val rootDir: File) {
       ))
 
   private fun populatePropsFromRom(map: NdsMap) {
+    // HGSS map types 4 and 5 are interiors. Their land-data building section is not consumed as
+    // field props by the indoor scene; treating it like an outdoor cell injects the surrounding
+    // New Bark building/sky set over otherwise-correct room terrain.
+    if (family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.HEART_GOLD &&
+        map.header.mapType in setOf(4, 5)) return
     val cells = resolveCells(map)
     if (cells.isEmpty()) return
     val (minX, minY, _, _) = footprint(cells)
