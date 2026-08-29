@@ -130,12 +130,12 @@ class Gen4Decomp(val rootDir: File) {
     fun mapType(): Int? =
         int()
             ?: when (value) {
-              "MAP_TYPE_INVALID" -> 0
-              "MAP_TYPE_CITY_TOWN" -> 1
-              "MAP_TYPE_ROUTE" -> 2
+              "MAP_TYPE_INVALID", "MAP_TYPE_NONE" -> 0
+              "MAP_TYPE_CITY_TOWN", "MAP_TYPE_TOWN_CITY" -> 1
+              "MAP_TYPE_ROUTE", "MAP_TYPE_OUTDOORS" -> 2
               "MAP_TYPE_CAVE" -> 3
-              "MAP_TYPE_INTERIOR" -> 4
-              "MAP_TYPE_POKEMON_CENTER" -> 5
+              "MAP_TYPE_INTERIOR", "MAP_TYPE_INDOORS" -> 4
+              "MAP_TYPE_POKEMON_CENTER", "MAP_TYPE_POKECENTER" -> 5
               "MAP_TYPE_UNDERGROUND" -> 6
               else -> null
             }
