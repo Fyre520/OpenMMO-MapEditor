@@ -201,7 +201,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsEventsPanel = NdsEventsPanel { onNdsEventsChanged() }
   private val ndsTileCombo = JComboBox<String>()
   private val ndsLayerSpinner = JSpinner(SpinnerNumberModel(0, 0, NdsGrid.LAYERS - 1, 1))
-  private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0, -32, 32, 1))
+  private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0.0, -32.0, 32.0, 0.25))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
   private val ndsPaintMode =
       JComboBox(arrayOf("Tile", "Collision", "Permission", "Height", "Select Object / Move Prop", "Remove Scenery Object"))
@@ -531,9 +531,12 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsLayerSpinner.addChangeListener {
       view()?.activeLayer = (ndsLayerSpinner.value as Number).toInt()
     }
-    ndsHeightSpinner.preferredSize = Dimension(60, ndsHeightSpinner.preferredSize.height)
+    ndsHeightSpinner.editor = JSpinner.NumberEditor(ndsHeightSpinner, "0.####")
+    ndsHeightSpinner.preferredSize = Dimension(72, ndsHeightSpinner.preferredSize.height)
+    ndsHeightSpinner.toolTipText =
+        "Tile height in map-tile units; arrows change it by 0.25 and decimals may be typed"
     ndsHeightSpinner.addChangeListener {
-      view()?.activeHeight = (ndsHeightSpinner.value as Number).toInt()
+      view()?.activeHeight = (ndsHeightSpinner.value as Number).toDouble()
     }
     ndsCollisionValueSpinner.preferredSize = Dimension(60, ndsCollisionValueSpinner.preferredSize.height)
     ndsCollisionValueSpinner.addChangeListener {

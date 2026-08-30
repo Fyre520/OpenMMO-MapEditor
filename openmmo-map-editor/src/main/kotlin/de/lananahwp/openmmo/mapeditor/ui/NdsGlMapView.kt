@@ -60,7 +60,7 @@ class NdsGlMapView(
 
   override var activeLayer = 0
   override var activeTile = 0
-  override var activeHeight = 0
+  override var activeHeight = 0.0
   override var brushCollision = 1
   override var showGrid = true
   override var showCollision = false
@@ -351,7 +351,7 @@ class NdsGlMapView(
           // Squares with no terrain over them keep sitting on the grid plane, so paint stays
           // visible on the open ground around a map as well as on the map itself.
           val ground = surface?.get(x)?.get(z)?.takeIf { !it.isNaN() } ?: 0.0
-          val base = ground + g.heightAt(layer, x, z).toDouble()
+          val base = ground + g.heightAt(layer, x, z)
           when (def.shape) {
             TileShape.FLAT -> {
               val top = shade(def.topColor, layer)

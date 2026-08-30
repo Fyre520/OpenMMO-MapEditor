@@ -1707,7 +1707,7 @@ class NdsProject(val rootDir: File) {
         val x = i % grid.cols
         val y = i / grid.cols
         grid.setTile(layer, x, y, c.int("tile") ?: -1)
-        grid.setHeight(layer, x, y, c.int("height") ?: 0)
+        grid.setHeight(layer, x, y, c.double("height") ?: 0.0)
       }
     }
     root.arr("collisions")?.items?.forEachIndexed { i, v ->
@@ -1784,7 +1784,7 @@ class NdsProject(val rootDir: File) {
             Json.JObj(
                 linkedMapOf(
                     "tile" to Json.JNum(grid.tileAt(layer, x, y).toDouble()),
-                    "height" to Json.JNum(grid.heightAt(layer, x, y).toDouble()),
+                    "height" to Json.JNum(grid.heightAt(layer, x, y)),
                 ))
           }
       root.entries["layer_$layer"] = Json.JArr(cells)
