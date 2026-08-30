@@ -242,6 +242,33 @@ private fun normalize3(v: DoubleArray): DoubleArray {
   else doubleArrayOf(v[0] / length, v[1] / length, v[2] / length)
 }
 
+/** Boundary edges for a triangle group, omitting the shared diagonal inside each BDHC plate. */
+internal fun ndsOutlineEdges(triangles: List<NdsTri>): List<FloatArray> {
+  if (triangles.isEmpty()) return emptyList()
+  fun key(x: Float, y: Float, z: Float): Long {
+    val qx = Math.round(x * 256.0).toLong() and 0x1FFFFF
+    val qy = Math.round(y * 256.0).toLong() and 0x1FFFFF
+    val qz = Math.round(z * 256.0).toLong() and 0x1FFFFF
+    return (qx shl 42) or (qy shl 21) or qz
+  }
+  val counts = HashMap<Pair<Long, Long>, Int>(triangles.size * 3)
+  val coordinates = HashMap<Pair<Long, Long>, FloatArray>(triangles.size * 3)
+  fun edge(ax: Float, ay: Float, az: Float, bx: Float, by: Float, bz: Float) {
+    val ka = key(ax, ay, az)
+    val kb = key(bx, by, bz)
+    if (ka == kb) return
+    val id = if (ka <= kb) ka to kb else kb to ka
+    counts[id] = (counts[id] ?: 0) + 1
+    coordinates.getOrPut(id) { floatArrayOf(ax, ay, az, bx, by, bz) }
+  }
+  for (triangle in triangles) {
+    edge(triangle.ax, triangle.ay, triangle.az, triangle.bx, triangle.by, triangle.bz)
+    edge(triangle.bx, triangle.by, triangle.bz, triangle.cx, triangle.cy, triangle.cz)
+    edge(triangle.cx, triangle.cy, triangle.cz, triangle.ax, triangle.ay, triangle.az)
+  }
+  return counts.entries.filter { it.value == 1 }.mapNotNull { coordinates[it.key] }
+}
+
 /**
  * Common surface for the DS 3D map views (OpenGL and software fallback).
  * Paint modes: 0 = tile, 1 = collision, 2 = permission, 3 = elevation.
@@ -249,12 +276,14 @@ private fun normalize3(v: DoubleArray): DoubleArray {
 interface Nds3DView {
   var grid: NdsGrid?
   var modelTriangles: List<NdsTri>
+  /** Read-only ROM walk surfaces, drawn only when the user enables the BDHC debug overlay. */
+  var walkSurfaceTriangles: List<NdsTri>
   var modelTextures: Map<String, NdsTexture>
   var modelPalettes: Map<String, IntArray>
   var modelOpacity: Float
   var activeLayer: Int
   var activeTile: Int
-  var activeHeight: Int
+  var activeHeight: Double
   var brushCollision: Int
   var showGrid: Boolean
   var showCollision: Boolean

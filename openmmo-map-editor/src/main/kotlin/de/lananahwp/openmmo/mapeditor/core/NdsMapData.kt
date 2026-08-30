@@ -29,6 +29,7 @@ class NdsMapData private constructor(
     val collisions: IntArray,
     val modelBytes: ByteArray?,
     val buildings: List<NdsBuilding>,
+    val bdhc: NdsBdhc?,
 ) {
   val permissionsSize = 32
   val collisionSize = 32
@@ -103,10 +104,15 @@ class NdsMapData private constructor(
       }
       cursor += bldLen
       if (cursor + nsbmdLen > bytes.size) {
-        return NdsMapData(permissions, collisions, null, buildings)
+        return NdsMapData(permissions, collisions, null, buildings, null)
       }
       val model = bytes.copyOfRange(cursor, cursor + nsbmdLen)
-      return NdsMapData(permissions, collisions, model, buildings)
+      cursor += nsbmdLen
+      val bdhc =
+          if (bdhcLen > 0 && cursor + bdhcLen <= bytes.size)
+            NdsBdhc.parse(bytes.copyOfRange(cursor, cursor + bdhcLen))
+          else null
+      return NdsMapData(permissions, collisions, model, buildings, bdhc)
     }
   }
 }

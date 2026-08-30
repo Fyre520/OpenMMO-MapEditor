@@ -12,6 +12,7 @@ dependencies {
   implementation("org.jogamp.jogl:jogl-all:2.6.0:natives-windows-amd64")
   implementation("org.jogamp.gluegen:gluegen-rt:2.6.0")
   implementation("org.jogamp.gluegen:gluegen-rt:2.6.0:natives-windows-amd64")
+  testImplementation(kotlin("test"))
 }
 
 kotlin {
@@ -82,4 +83,13 @@ tasks.register<JavaExec>("propCatalogSheets") {
   classpath = sourceSets.main.get().runtimeClasspath
   mainClass.set("de.lananahwp.openmmo.mapeditor.NdsPropCatalogGeneratorKt")
   args(projectDir.parentFile.absolutePath, layout.buildDirectory.dir("prop-catalog").get().asFile.absolutePath)
+}
+tasks.register<JavaExec>("bdhcDiagnostic") {
+  dependsOn(tasks.classes)
+  classpath = sourceSets.main.get().runtimeClasspath
+  mainClass.set("de.lananahwp.openmmo.mapeditor.NdsBdhcDiagnosticKt")
+  args(
+      providers.gradleProperty("rom").getOrElse(""),
+      providers.gradleProperty("family").getOrElse("pt"),
+  )
 }

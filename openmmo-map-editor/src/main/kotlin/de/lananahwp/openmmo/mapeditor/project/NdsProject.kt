@@ -1,6 +1,7 @@
 package de.lananahwp.openmmo.mapeditor.project
 
 import de.lananahwp.openmmo.mapeditor.core.Gen4Decomp
+import de.lananahwp.openmmo.mapeditor.core.NdsTri
 import de.lananahwp.openmmo.mapeditor.json.Json
 import de.lananahwp.openmmo.mapeditor.json.JsonParser
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
@@ -619,6 +620,96 @@ class NdsProject(val rootDir: File) {
     } catch (_: Throwable) {
       emptyList()
     }
+  }
+
+  /**
+   * ROM BDHC plates placed in the same editor map coordinates as [trianglesFor].
+   *
+   * This is deliberately a read-only debug surface. It is never merged into terrain triangles,
+   * so showing it cannot change tile resting height, surface picking, collision or permissions.
+   */
+  fun bdhcTrianglesFor(map: NdsMap): List<NdsTri> {
+    if (map.isCustom || importedModelFile(map.name).isFile) return emptyList()
+    val cells = resolveCells(map)
+    if (cells.isEmpty()) return emptyList()
+    val (minCellX, minCellY, _, _) = footprint(cells)
+    val terrainGround = cells.mapNotNull {
+      mapFileIndex(it.fileIndex)?.modelBytes?.let(::cellMinY)
+    }.minOrNull() ?: 0f
+    val editorGroundOffset = terrainGround * TILE_SCALE
+    val out = ArrayList<NdsTri>()
+    for (cell in cells) {
+      val bdhc = mapFileIndex(cell.fileIndex)?.bdhc ?: continue
+      val cellOriginX = (cell.cellX - minCellX) * NdsGrid.COLS
+      val cellOriginZ = (cell.cellY - minCellY) * NdsGrid.ROWS
+      for (plateIndex in bdhc.plates.indices) {
+        val bounds = bdhc.plateBounds(plateIndex) ?: continue
+        val x0 = cellOriginX + NdsGrid.COLS / 2f +
+            (bounds[0] / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE).toFloat()
+        val z0 = cellOriginZ + NdsGrid.ROWS / 2f +
+            (bounds[1] / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE).toFloat()
+        val x1 = cellOriginX + NdsGrid.COLS / 2f +
+            (bounds[2] / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE).toFloat()
+        val z1 = cellOriginZ + NdsGrid.ROWS / 2f +
+            (bounds[3] / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE).toFloat()
+        if (x1 <= x0 || z1 <= z0) continue
+        fun y(gameX: Double, gameZ: Double): Float? =
+            bdhc.plateHeightAt(plateIndex, gameX, gameZ)?.let {
+              (it / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE).toFloat() -
+                  editorGroundOffset
+            }
+        val y00 = y(bounds[0], bounds[1]) ?: continue
+        val y10 = y(bounds[2], bounds[1]) ?: continue
+        val y11 = y(bounds[2], bounds[3]) ?: continue
+        val y01 = y(bounds[0], bounds[3]) ?: continue
+        val color = 0xFF36D6E7.toInt()
+        val group = "bdhc:${cell.fileIndex}:$plateIndex"
+        out += NdsTri(
+            x0, y00, z0, x1, y10, z0, x1, y11, z1, color,
+            0f, 0f, 0f, 0f, 0f, 0f, editGroup = group)
+        out += NdsTri(
+            x0, y00, z0, x1, y11, z1, x0, y01, z1, color,
+            0f, 0f, 0f, 0f, 0f, 0f, editGroup = group)
+      }
+    }
+    return out
+  }
+
+  /**
+   * Queries the source ROM's walkable height at editor map coordinates [x], [z].
+   *
+   * The returned value uses editor tile-height units. Overlapping floors follow the ROM rule and
+   * choose the candidate nearest [currentY]. Custom maps and imported replacement models have no
+   * implicit ROM BDHC, because pairing old collision planes with new geometry would be unsafe.
+   */
+  fun bdhcHeightAt(map: NdsMap, currentY: Double, x: Double, z: Double): Double? {
+    if (map.isCustom || importedModelFile(map.name).isFile) return null
+    val cells = resolveCells(map)
+    if (cells.isEmpty()) return null
+    val (minCellX, minCellY, _, _) = footprint(cells)
+    val terrainGround = cells.mapNotNull {
+      mapFileIndex(it.fileIndex)?.modelBytes?.let(::cellMinY)
+    }.minOrNull() ?: 0f
+    val editorGroundOffset = terrainGround * TILE_SCALE
+    for (cell in cells) {
+      val cellOriginX = (cell.cellX - minCellX) * NdsGrid.COLS
+      val cellOriginZ = (cell.cellY - minCellY) * NdsGrid.ROWS
+      // Treat each matrix cell as half-open so a point on a seam is queried from exactly one
+      // BDHC section instead of whichever neighbouring cell happened to be resolved first.
+      if (x < cellOriginX || x >= cellOriginX + NdsGrid.COLS ||
+          z < cellOriginZ || z >= cellOriginZ + NdsGrid.ROWS) continue
+      val bdhc = mapFileIndex(cell.fileIndex)?.bdhc ?: continue
+      val gameX = (x - cellOriginX - NdsGrid.COLS / 2.0) *
+          de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE
+      val gameZ = (z - cellOriginZ - NdsGrid.ROWS / 2.0) *
+          de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE
+      val gameCurrentY = (currentY + editorGroundOffset) *
+          de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE
+      return bdhc.heightAt(gameCurrentY, gameX, gameZ)?.let {
+        it / de.lananahwp.openmmo.mapeditor.core.NdsBdhc.GAME_UNITS_PER_TILE - editorGroundOffset
+      }
+    }
+    return null
   }
 
   /** Finds the nearest elevated connected terrain object beneath a grid click. */
@@ -1617,6 +1708,11 @@ class NdsProject(val rootDir: File) {
       ))
 
   private fun populatePropsFromRom(map: NdsMap) {
+    // HGSS map types 4 and 5 are interiors. Their land-data building section is not consumed as
+    // field props by the indoor scene; treating it like an outdoor cell injects the surrounding
+    // New Bark building/sky set over otherwise-correct room terrain.
+    if (family == de.lananahwp.openmmo.mapeditor.core.NdsFamily.HEART_GOLD &&
+        map.header.mapType in setOf(4, 5)) return
     val cells = resolveCells(map)
     if (cells.isEmpty()) return
     val (minX, minY, _, _) = footprint(cells)
@@ -1702,7 +1798,7 @@ class NdsProject(val rootDir: File) {
         val x = i % grid.cols
         val y = i / grid.cols
         grid.setTile(layer, x, y, c.int("tile") ?: -1)
-        grid.setHeight(layer, x, y, c.int("height") ?: 0)
+        grid.setHeight(layer, x, y, c.double("height") ?: 0.0)
       }
     }
     root.arr("collisions")?.items?.forEachIndexed { i, v ->
@@ -1779,7 +1875,7 @@ class NdsProject(val rootDir: File) {
             Json.JObj(
                 linkedMapOf(
                     "tile" to Json.JNum(grid.tileAt(layer, x, y).toDouble()),
-                    "height" to Json.JNum(grid.heightAt(layer, x, y).toDouble()),
+                    "height" to Json.JNum(grid.heightAt(layer, x, y)),
                 ))
           }
       root.entries["layer_$layer"] = Json.JArr(cells)
