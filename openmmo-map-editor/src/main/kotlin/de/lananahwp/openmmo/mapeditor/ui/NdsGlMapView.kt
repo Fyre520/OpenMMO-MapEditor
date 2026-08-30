@@ -67,6 +67,15 @@ class NdsGlMapView(
   var paintMode: PaintMode = PaintMode.TILE
   override var markers: List<NdsEventMarker> = emptyList()
 
+  override var walkSurfaceTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
+    set(value) {
+      field = value
+      // Keep neighbouring plates visibly distinct while dropping each quad's internal diagonal.
+      walkSurfaceOutline = value.groupBy { it.editGroup }.values.flatMap(::ndsOutlineEdges)
+      repaint()
+    }
+
+  private var walkSurfaceOutline: List<FloatArray> = emptyList()
   override var modelTriangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri> = emptyList()
     set(value) {
       field = value
@@ -202,6 +211,7 @@ class NdsGlMapView(
     drawGround(gl)
     drawModel(gl)
     drawPlacedTiles(gl)
+    drawWalkSurfaces(gl)
     drawMarkers(gl)
     gl.glFlush()
   }
@@ -496,6 +506,57 @@ class NdsGlMapView(
     if (translucent) gl.glDepthMask(true)
     gl.glEnable(GL2.GL_BLEND)
     gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  /** Draws ROM BDHC as a non-interactive cyan debug overlay. */
+  private fun drawWalkSurfaces(gl: GL2) {
+    if (walkSurfaceTriangles.isEmpty()) return
+    val xf = modelXform() ?: return
+    gl.glDisable(GL2.GL_LIGHTING)
+    gl.glDisable(GL2.GL_TEXTURE_2D)
+    gl.glEnable(GL2.GL_BLEND)
+    gl.glBlendFunc(GL2.GL_SRC_ALPHA, GL2.GL_ONE_MINUS_SRC_ALPHA)
+    gl.glDepthMask(false)
+
+    gl.glColor4f(0.15f, 0.88f, 0.96f, 0.30f)
+    gl.glBegin(GL2.GL_TRIANGLES)
+    for (tri in walkSurfaceTriangles) {
+      highlightVertex(gl, tri.ax, tri.ay, tri.az, xf)
+      highlightVertex(gl, tri.bx, tri.by, tri.bz, xf)
+      highlightVertex(gl, tri.cx, tri.cy, tri.cz, xf)
+    }
+    gl.glEnd()
+
+    gl.glColor4f(0.45f, 0.96f, 1f, 0.90f)
+    gl.glLineWidth(1.5f)
+    gl.glBegin(GL2.GL_LINES)
+    for (edge in walkSurfaceOutline) {
+      highlightVertex(gl, edge[0], edge[1], edge[2], xf)
+      highlightVertex(gl, edge[3], edge[4], edge[5], xf)
+    }
+    gl.glEnd()
+    gl.glLineWidth(1f)
+
+    gl.glDepthMask(true)
+    gl.glDisable(GL2.GL_BLEND)
+    gl.glEnable(GL2.GL_LIGHTING)
+  }
+
+  /**
+   * How far the selection is lifted off the surface it marks, in world units.
+   *
+   * The view fits a map into ~30 world units, so this is a small fraction of one map square --
+   * invisible in practice, but far larger than the depth-buffer resolution at the furthest zoom
+   * the camera allows, which is what keeps the selection from flickering against the terrain.
+   */
+  private val highlightLift = 0.02
+
+  private fun highlightVertex(gl: GL2, x: Float, y: Float, z: Float, xf: ModelXform) {
+    gl.glVertex3d(
+        16.0 + (x - xf.cx) * xf.scale,
+        (y - xf.groundY).toDouble() * xf.scale + highlightLift,
+        16.0 + (z - xf.cz) * xf.scale,
+    )
   }
 
   private fun textureWrapMode(repeat: Boolean, flip: Boolean): Int =

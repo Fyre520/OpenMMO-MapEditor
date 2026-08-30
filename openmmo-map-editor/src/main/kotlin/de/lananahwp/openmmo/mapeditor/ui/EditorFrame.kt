@@ -207,6 +207,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       JComboBox(arrayOf("Tile", "Collision", "Permission", "Height", "Select Object / Move Prop", "Remove Scenery Object"))
   private val ndsGridCheck = JCheckBox("Grid")
   private val ndsCollisionCheck = JCheckBox("Collisions")
+  private val ndsWalkSurfaceCheck = JCheckBox("Show walk surfaces")
   private val ndsClearCollisionWithTerrain = JCheckBox("Clear collision with object", true)
   private val ndsCollisionEditView = JCheckBox("Transparent collision view")
   private val ndsRestoreTerrainButton = JButton("Restore last object")
@@ -545,6 +546,9 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsGridCheck.isSelected = true
     ndsGridCheck.addActionListener { view()?.showGrid = ndsGridCheck.isSelected }
     ndsCollisionCheck.addActionListener { view()?.showCollision = ndsCollisionCheck.isSelected }
+    ndsWalkSurfaceCheck.toolTipText =
+        "Show the ROM's invisible BDHC walkable-height plates (read-only; not saved)"
+    ndsWalkSurfaceCheck.addActionListener { refreshNdsWalkSurfaces() }
     ndsCollisionEditView.addActionListener {
       val enabled = ndsCollisionEditView.isSelected
       if (enabled) {
@@ -579,6 +583,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     toolbar.add(ndsCollisionCheck)
     val terrainToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 2))
     terrainToolbar.add(ndsCollisionEditView)
+    terrainToolbar.add(ndsWalkSurfaceCheck)
     terrainToolbar.add(ndsClearCollisionWithTerrain)
     terrainToolbar.add(ndsRestoreTerrainButton)
     terrainToolbar.add(JLabel("  Middle drag rotates · Left click edits · Right drag pans · Wheel zooms"))
@@ -622,7 +627,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     created.showCollision = ndsCollisionCheck.isSelected
     created.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     created.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
+    created.walkSurfaceTriangles = currentNdsWalkSurfaces()
     return created
+  }
+
+  /** Resolves the optional ROM BDHC overlay without ever adding it to editable terrain. */
+  private fun currentNdsWalkSurfaces(): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
+    if (!ndsWalkSurfaceCheck.isSelected) return emptyList()
+    val project = currentNdsHolder?.project ?: return emptyList()
+    val map = currentNdsMap ?: return emptyList()
+    return project.bdhcTrianglesFor(map)
+  }
+
+  private fun refreshNdsWalkSurfaces() {
+    val triangles = currentNdsWalkSurfaces()
+    view()?.walkSurfaceTriangles = triangles
+    status.text = when {
+      !ndsWalkSurfaceCheck.isSelected -> "Walk-surface overlay hidden"
+      triangles.isNotEmpty() -> "Showing ${triangles.size / 2} ROM BDHC walk-surface plate(s)"
+      currentNdsMap?.isCustom == true -> "This custom map has no ROM BDHC walk surfaces"
+      currentNdsMap != null -> "No compatible ROM BDHC walk surfaces are available for this map"
+      else -> "Open a Nintendo DS map to show its ROM BDHC walk surfaces"
+    }
   }
 
   private fun buildMenuBar(): JMenuBar {
@@ -942,6 +968,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       val v = view()
       if (v != null) {
         v.modelTriangles = holder.project.trianglesFor(map)
+        // An imported mesh no longer matches the ROM's invisible walk planes.
+        v.walkSurfaceTriangles = emptyList()
         v.modelTextures = holder.project.texturesFor(map)
         v.modelPalettes = holder.project.palettesFor(map)
       }
@@ -1281,6 +1309,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val tris = ref.holder.project.trianglesFor(map)
     val bld = ref.holder.project.buildingTrianglesFor(map)
     v.modelTriangles = if (bld.isEmpty()) tris else tris + bld
+    v.walkSurfaceTriangles = currentNdsWalkSurfaces()
     v.modelTextures = ref.holder.project.texturesFor(map)
     v.modelPalettes = ref.holder.project.palettesFor(map)
     ndsHeaderPanel.setMap(map)
