@@ -193,6 +193,10 @@ object NdsNsbmd {
     val factor = if (worldScale) model.modelScale / 64f else 1f
     val out = mutableListOf<NdsTri>()
     for (poly in model.polygons) {
+      // SBC NODE commands carry the authored object visibility used by Nitro at draw time.
+      // Indoor land models include enclosing/editor-only shells which must not be emitted when
+      // their owning node is hidden.
+      if (poly.jointId in model.objects.indices && !model.objects[poly.jointId].visible) continue
       for (t in decodePolygon(poly, model)) {
         if (factor == 1f) {
           out += t
