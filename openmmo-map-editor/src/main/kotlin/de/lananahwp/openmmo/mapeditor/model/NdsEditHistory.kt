@@ -9,8 +9,8 @@ data class NdsCellEdit(
     val layer: Int,
     val x: Int,
     val z: Int,
-    val before: Int,
-    val after: Int,
+    val before: Number,
+    val after: Number,
 )
 
 /** A paint stroke: every square one press-drag-release wrote, in the order it wrote them. */
@@ -45,7 +45,7 @@ class NdsEditHistory(private val limit: Int = DEFAULT_LIMIT) {
 
   /** Records one grid write. A stroke that changes nothing never reaches the undo stack. */
   fun recordCell(edit: NdsCellEdit) {
-    if (edit.before == edit.after) return
+    if (edit.before.toDouble() == edit.after.toDouble()) return
     val open = stroke ?: NdsGridStep("tile").also { stroke = it }
     if (open.edits.isEmpty()) push(open)
     open.edits += edit
@@ -76,12 +76,12 @@ class NdsEditHistory(private val limit: Int = DEFAULT_LIMIT) {
     redoSteps.clear()
   }
 
-  private fun apply(map: NdsMap, edit: NdsCellEdit, value: Int) {
+  private fun apply(map: NdsMap, edit: NdsCellEdit, value: Number) {
     when (edit.kind) {
-      NdsCellKind.TILE -> map.grid.setTile(edit.layer, edit.x, edit.z, value)
+      NdsCellKind.TILE -> map.grid.setTile(edit.layer, edit.x, edit.z, value.toInt())
       NdsCellKind.HEIGHT -> map.grid.setHeight(edit.layer, edit.x, edit.z, value)
-      NdsCellKind.COLLISION -> map.grid.setCollision(edit.x, edit.z, value)
-      NdsCellKind.PERMISSION -> map.grid.setPermission(edit.x, edit.z, value)
+      NdsCellKind.COLLISION -> map.grid.setCollision(edit.x, edit.z, value.toInt())
+      NdsCellKind.PERMISSION -> map.grid.setPermission(edit.x, edit.z, value.toInt())
     }
   }
 

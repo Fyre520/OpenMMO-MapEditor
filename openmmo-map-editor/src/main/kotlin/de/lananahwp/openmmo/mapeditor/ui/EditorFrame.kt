@@ -2662,7 +2662,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               x,
               z,
               map.grid.heightAt(layer, x, z),
-              view.activeHeight.coerceIn(-32, 32),
+              view.activeHeight.coerceIn(-32.0, 32.0),
           ))
       map.grid.setHeight(layer, x, z, view.activeHeight)
     } else {
