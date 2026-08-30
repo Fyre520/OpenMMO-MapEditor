@@ -27,6 +27,8 @@ class NdsGlMapView(
     private val onPaintCell: (x: Int, z: Int) -> Unit,
     private val onPaintCollision: (x: Int, z: Int, value: Int) -> Unit,
     private val onCellInteraction: (hit: NdsPointerHit, dragging: Boolean) -> Boolean = { _, _ -> false },
+    /** Called before the first cell in a press-drag-release paint gesture. */
+    private val onStrokeBegin: () -> Unit = {},
 ) : GLCanvas(GLCapabilities(GLProfile.get(GLProfile.GL2))), GLEventListener, Nds3DView {
 
   enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
@@ -113,6 +115,7 @@ class NdsGlMapView(
             if (e.button == MouseEvent.BUTTON1) {
               val hit = pointerHit(e.x, e.y, includeModelGroup = true) ?: return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
+                onStrokeBegin()
                 paint(hit.cellX, hit.cellZ)
               }
             }
