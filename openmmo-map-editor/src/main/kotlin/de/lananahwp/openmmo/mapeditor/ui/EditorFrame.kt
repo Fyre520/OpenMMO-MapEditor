@@ -9,7 +9,11 @@ import de.lananahwp.openmmo.mapeditor.json.JsonParser
 import de.lananahwp.openmmo.mapeditor.json.JsonWriter
 import de.lananahwp.openmmo.mapeditor.model.EditorMap
 import de.lananahwp.openmmo.mapeditor.model.MetatileBrush
+import de.lananahwp.openmmo.mapeditor.model.NdsCellEdit
+import de.lananahwp.openmmo.mapeditor.model.NdsCellKind
+import de.lananahwp.openmmo.mapeditor.model.NdsEditHistory
 import de.lananahwp.openmmo.mapeditor.model.NdsGrid
+import de.lananahwp.openmmo.mapeditor.model.NdsGridStep
 import de.lananahwp.openmmo.mapeditor.model.NdsMap
 import de.lananahwp.openmmo.mapeditor.project.DecompProject
 import de.lananahwp.openmmo.mapeditor.project.NdsExporter
@@ -17,10 +21,13 @@ import de.lananahwp.openmmo.mapeditor.project.NdsProject
 import de.lananahwp.openmmo.mapeditor.project.OpenmmoExporter
 import java.awt.BorderLayout
 import java.awt.CardLayout
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
 import java.awt.event.InputEvent
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.WindowAdapter
@@ -145,6 +152,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val redoStack = ArrayDeque<List<TileEdit>>()
   private val snapshotUndoStack = ArrayDeque<Pair<String, String>>()
   private val snapshotRedoStack = ArrayDeque<Pair<String, String>>()
+  // DS history is separate because the GBA and DS editors never operate on the same map.
+  private val ndsHistory = NdsEditHistory()
   private var copiedEvent: CopiedEvent? = null
   private var copiedEvents: CopiedEvents? = null
   private val selectedEventMarkers = mutableSetOf<MapEventMarker>()
@@ -608,6 +617,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { x, z -> paintNdsCell(x, z) },
             { x, z, value -> paintNdsCollision(x, z, value) },
             { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+            { ndsHistory.beginStroke(ndsStrokeLabel()) },
         )
     val created =
         try {
@@ -615,12 +625,14 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { x, z -> paintNdsCell(x, z) },
               { x, z, value -> paintNdsCollision(x, z, value) },
               { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+              { ndsHistory.beginStroke(ndsStrokeLabel()) },
           )
         } catch (t: Throwable) {
           System.out.println("[Nds] OpenGL view unavailable (${t.message}); using software renderer")
           software
         }
     ndsView = created
+    installNdsShortcuts(created.asComponent())
     ndsViewContainer.removeAll()
     ndsViewContainer.add(created.asComponent(), BorderLayout.CENTER)
     ndsViewContainer.revalidate()
@@ -1231,6 +1243,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     redoStack.clear()
     snapshotUndoStack.clear()
     snapshotRedoStack.clear()
+    ndsHistory.clear()
     selectedEventMarkers.clear()
     syncSelectedEvents()
     canvas.blockWidth = map.layout.width
@@ -1300,6 +1313,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
           this, "Cannot load DS map ${ref.name}", "Load failed", JOptionPane.WARNING_MESSAGE)
       return
     }
+    // History contains coordinates for one particular map and cannot follow a map switch.
+    ndsHistory.clear()
     currentNdsHolder = ref.holder
     currentNdsMap = map
     currentNdsRef = ref
@@ -1768,6 +1783,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun undo() {
+    if (currentNdsMap != null) {
+      undoNds()
+      return
+    }
     val map = currentMap ?: return
     if (undoStack.isNotEmpty()) {
       val edits = undoStack.removeLast()
@@ -1786,6 +1805,10 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   private fun redo() {
+    if (currentNdsMap != null) {
+      redoNds()
+      return
+    }
     val map = currentMap ?: return
     if (redoStack.isNotEmpty()) {
       val edits = redoStack.removeLast()
@@ -2566,13 +2589,92 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     v.asComponent().repaint()
   }
 
+  // ---- DS undo --------------------------------------------------------------
+
+  /**
+   * Binds undo/redo to the 3D component because Swing menu accelerators are not reliably
+   * delivered while the heavyweight OpenGL canvas owns focus.
+   */
+  private fun installNdsShortcuts(component: Component) {
+    component.isFocusable = true
+    component.addMouseListener(object : MouseAdapter() {
+      override fun mousePressed(e: MouseEvent) {
+        component.requestFocusInWindow()
+      }
+    })
+    component.addKeyListener(object : KeyAdapter() {
+      override fun keyPressed(e: KeyEvent) {
+        if (!e.isControlDown) return
+        when (e.keyCode) {
+          KeyEvent.VK_Z -> if (e.isShiftDown) redo() else undo()
+          KeyEvent.VK_Y -> redo()
+          else -> return
+        }
+        e.consume()
+      }
+    })
+  }
+
+  private fun ndsStrokeLabel(): String =
+      when (ndsPaintMode.selectedIndex) {
+        1 -> "collision"
+        2 -> "permission"
+        3 -> "height"
+        else -> "tile"
+      }
+
+  private fun undoNds() {
+    val map = currentNdsMap ?: return
+    val step = ndsHistory.undo(map)
+    if (step == null) {
+      status.text = "Nothing left to undo"
+      return
+    }
+    afterNdsHistoryStep(step, undone = true)
+  }
+
+  private fun redoNds() {
+    val map = currentNdsMap ?: return
+    val step = ndsHistory.redo(map)
+    if (step == null) {
+      status.text = "Nothing left to redo"
+      return
+    }
+    afterNdsHistoryStep(step, undone = false)
+  }
+
+  private fun afterNdsHistoryStep(step: NdsGridStep, undone: Boolean) {
+    val verb = if (undone) "Undid" else "Redid"
+    view()?.asComponent()?.repaint()
+    status.text = "$verb ${step.edits.size} ${step.label} edit(s)"
+    markDirty()
+  }
+
   private fun paintNdsCell(x: Int, z: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     val layer = view.activeLayer
     if (ndsPaintMode.selectedIndex == 3) {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.HEIGHT,
+              layer,
+              x,
+              z,
+              map.grid.heightAt(layer, x, z),
+              view.activeHeight.coerceIn(-32.0, 32.0),
+          ))
       map.grid.setHeight(layer, x, z, view.activeHeight)
     } else {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.TILE,
+              layer,
+              x,
+              z,
+              map.grid.tileAt(layer, x, z),
+              view.activeTile,
+          ))
       map.grid.setTile(layer, x, z, view.activeTile)
     }
     markDirty()
@@ -2582,9 +2684,28 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun paintNdsCollision(x: Int, z: Int, value: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
+    val masked = value and 0xFF
     if (ndsPaintMode.selectedIndex == 2) {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.PERMISSION,
+              0,
+              x,
+              z,
+              map.grid.permissionAt(x, z),
+              masked,
+          ))
       map.grid.setPermission(x, z, value)
     } else {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.COLLISION,
+              0,
+              x,
+              z,
+              map.grid.collisionAt(x, z),
+              masked,
+          ))
       map.grid.setCollision(x, z, value)
     }
     markDirty()
