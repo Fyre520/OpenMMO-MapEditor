@@ -617,6 +617,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
             { x, z -> paintNdsCell(x, z) },
             { x, z, value -> paintNdsCollision(x, z, value) },
             { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+            { x, z -> eraseNdsCell(x, z) },
             { ndsHistory.beginStroke(ndsStrokeLabel()) },
         )
     val created =
@@ -625,6 +626,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               { x, z -> paintNdsCell(x, z) },
               { x, z, value -> paintNdsCollision(x, z, value) },
               { hit, dragging -> handleNdsCellInteraction(hit, dragging) },
+              { x, z -> eraseNdsCell(x, z) },
               { ndsHistory.beginStroke(ndsStrokeLabel()) },
           )
         } catch (t: Throwable) {
@@ -2676,6 +2678,38 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               view.activeTile,
           ))
       map.grid.setTile(layer, x, z, view.activeTile)
+    }
+    markDirty()
+    view.asComponent().repaint()
+  }
+
+  /** Ctrl+click/drag in Tile or Height mode restores the active cell's default value. */
+  private fun eraseNdsCell(x: Int, z: Int) {
+    val map = currentNdsMap ?: return
+    val view = view() ?: return
+    val layer = view.activeLayer
+    if (ndsPaintMode.selectedIndex == 3) {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.HEIGHT,
+              layer,
+              x,
+              z,
+              map.grid.heightAt(layer, x, z),
+              0.0,
+          ))
+      map.grid.setHeight(layer, x, z, 0.0)
+    } else {
+      ndsHistory.recordCell(
+          NdsCellEdit(
+              NdsCellKind.TILE,
+              layer,
+              x,
+              z,
+              map.grid.tileAt(layer, x, z),
+              -1,
+          ))
+      map.grid.setTile(layer, x, z, -1)
     }
     markDirty()
     view.asComponent().repaint()
