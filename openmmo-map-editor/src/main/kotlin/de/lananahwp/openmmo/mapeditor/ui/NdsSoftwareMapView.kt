@@ -32,6 +32,8 @@ class NdsSoftwareMapView(
     private val onPaintCell: (x: Int, z: Int) -> Unit,
     private val onPaintCollision: (x: Int, z: Int, value: Int) -> Unit,
     private val onCellInteraction: (hit: NdsPointerHit, dragging: Boolean) -> Boolean = { _, _ -> false },
+    /** Ctrl+click/drag in Tile or Height mode clears the cell instead of painting it. */
+    private val onEraseCell: (x: Int, z: Int) -> Unit = { _, _ -> },
     /** Called before the first cell in a press-drag-release paint gesture. */
     private val onStrokeBegin: () -> Unit = {},
 ) : JPanel(), Nds3DView {
@@ -121,7 +123,7 @@ class NdsSoftwareMapView(
               val hit = pointerHit(e.x, e.y, includeModelGroup = true) ?: return
               if (!onCellInteraction(hit, false) && hit.cellX != null && hit.cellZ != null) {
                 onStrokeBegin()
-                paint(hit.cellX, hit.cellZ)
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -153,7 +155,7 @@ class NdsSoftwareMapView(
             } else if (SwingUtilities.isLeftMouseButton(e)) {
               val hit = pointerHit(e.x, e.y, includeModelGroup = false) ?: return
               if (!onCellInteraction(hit, true) && hit.cellX != null && hit.cellZ != null) {
-                paint(hit.cellX, hit.cellZ)
+                paint(hit.cellX, hit.cellZ, e.isControlDown)
               }
             }
           }
@@ -172,12 +174,12 @@ class NdsSoftwareMapView(
     }
   }
 
-  private fun paint(x: Int, z: Int) {
+  private fun paint(x: Int, z: Int, erase: Boolean) {
     when (paintMode) {
-      PaintMode.TILE -> onPaintCell(x, z)
+      PaintMode.TILE -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
-      PaintMode.ELEVATION -> onPaintCell(x, z)
+      PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
     }
   }
 
