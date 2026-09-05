@@ -38,15 +38,16 @@ class NdsSoftwareMapView(
     private val onStrokeBegin: () -> Unit = {},
 ) : JPanel(), Nds3DView {
 
-  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
+  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
 
   override fun setPaintMode(mode: Int) {
     paintMode =
         when (mode) {
+          0 -> PaintMode.TILE
           1 -> PaintMode.COLLISION
           2 -> PaintMode.PERMISSION
           3 -> PaintMode.ELEVATION
-          else -> PaintMode.TILE
+          else -> PaintMode.NONE
         }
   }
 
@@ -67,6 +68,11 @@ class NdsSoftwareMapView(
   override var activeLayer = 0
   override var activeTile = 0
   override var activeHeight = 0.0
+  override var brushSize = 1
+    set(value) {
+      field = value.coerceIn(1, 32)
+      repaint()
+    }
   override var brushCollision = 1
   override var showGrid = true
   override var showCollision = false
@@ -180,6 +186,7 @@ class NdsSoftwareMapView(
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
       PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.NONE -> Unit
     }
   }
 
@@ -308,9 +315,12 @@ class NdsSoftwareMapView(
         line(lines, cam, a[0], a[1], a[2], b[0], b[1], b[2], lineColor)
       }
     }
-    hoverCell?.let { (hx, hz) ->
-      val p = gx(hx.toDouble(), hz.toDouble())
-      quad(tiles, cam, p[0], p[1] + 0.02, p[2], Color(255, 255, 120, 90))
+    if (paintMode != PaintMode.NONE) hoverCell?.let { (hx, hz) ->
+      for ((cellX, cellZ) in ndsBrushFootprint(
+          hx, hz, brushSize, grid.cols, grid.rows)) {
+        val p = gx(cellX.toDouble(), cellZ.toDouble())
+        quad(tiles, cam, p[0], p[1] + 0.02, p[2], Color(255, 255, 120, 90))
+      }
     }
     for (layer in 0 until NdsGrid.LAYERS) {
       for (x in 0 until grid.cols) {

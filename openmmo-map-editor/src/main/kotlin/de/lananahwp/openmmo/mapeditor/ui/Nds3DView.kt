@@ -284,6 +284,8 @@ interface Nds3DView {
   var activeLayer: Int
   var activeTile: Int
   var activeHeight: Double
+  /** Width and depth, in map cells, of the paint cursor and one paint operation. */
+  var brushSize: Int
   var brushCollision: Int
   var showGrid: Boolean
   var showCollision: Boolean
@@ -291,4 +293,24 @@ interface Nds3DView {
   fun setPaintMode(mode: Int)
 
   fun asComponent(): Component
+}
+
+/** Cells covered by a centered square brush, clipped to the map bounds. */
+internal fun ndsBrushFootprint(
+    x: Int,
+    z: Int,
+    size: Int,
+    cols: Int,
+    rows: Int,
+): List<Pair<Int, Int>> {
+  val span = size.coerceAtLeast(1)
+  val originX = x - (span - 1) / 2
+  val originZ = z - (span - 1) / 2
+  return buildList(span * span) {
+    for (cellZ in originZ until originZ + span) {
+      for (cellX in originX until originX + span) {
+        if (cellX in 0 until cols && cellZ in 0 until rows) add(cellX to cellZ)
+      }
+    }
+  }
 }

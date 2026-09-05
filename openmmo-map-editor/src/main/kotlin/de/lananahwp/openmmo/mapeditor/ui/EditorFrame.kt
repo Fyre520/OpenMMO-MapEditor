@@ -212,6 +212,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private val ndsLayerSpinner = JSpinner(SpinnerNumberModel(0, 0, NdsGrid.LAYERS - 1, 1))
   private val ndsHeightSpinner = JSpinner(SpinnerNumberModel(0.0, -32.0, 32.0, 0.25))
   private val ndsCollisionValueSpinner = JSpinner(SpinnerNumberModel(0, 0, 255, 1))
+  /** Width in cells of the square brush used by the four grid-backed paint modes. */
+  private val ndsTileBrushSpinner = JSpinner(SpinnerNumberModel(1, 1, 32, 1))
   private val ndsPaintMode =
       JComboBox(arrayOf("Tile", "Collision", "Permission", "Height", "Select Object / Move Prop", "Remove Scenery Object"))
   private val ndsGridCheck = JCheckBox("Grid")
@@ -548,12 +550,19 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsHeightSpinner.addChangeListener {
       view()?.activeHeight = (ndsHeightSpinner.value as Number).toDouble()
     }
+    ndsTileBrushSpinner.preferredSize = Dimension(60, ndsTileBrushSpinner.preferredSize.height)
+    ndsTileBrushSpinner.toolTipText =
+        "How many cells across one click paints, centered on the cell under the pointer"
+    ndsTileBrushSpinner.addChangeListener {
+      view()?.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
+    }
     ndsCollisionValueSpinner.preferredSize = Dimension(60, ndsCollisionValueSpinner.preferredSize.height)
     ndsCollisionValueSpinner.addChangeListener {
       view()?.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     }
     ndsPaintMode.addActionListener {
       view()?.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
+      ndsTileBrushSpinner.isEnabled = ndsPaintMode.selectedIndex in 0..3
     }
     ndsGridCheck.isSelected = true
     ndsGridCheck.addActionListener { view()?.showGrid = ndsGridCheck.isSelected }
@@ -587,6 +596,8 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     toolbar.add(ndsLayerSpinner)
     toolbar.add(JLabel("Height:"))
     toolbar.add(ndsHeightSpinner)
+    toolbar.add(JLabel("Brush:"))
+    toolbar.add(ndsTileBrushSpinner)
     toolbar.add(JLabel("Mode:"))
     toolbar.add(ndsPaintMode)
     toolbar.add(JLabel("Value:"))
@@ -642,6 +653,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     created.setPaintMode(ndsPaintMode.selectedIndex.coerceAtLeast(0))
     created.showGrid = ndsGridCheck.isSelected
     created.showCollision = ndsCollisionCheck.isSelected
+    created.brushSize = (ndsTileBrushSpinner.value as Number).toInt()
     created.brushCollision = (ndsCollisionValueSpinner.value as Number).toInt()
     created.modelOpacity = if (ndsCollisionEditView.isSelected) 0.12f else 1f
     created.walkSurfaceTriangles = currentNdsWalkSurfaces()
@@ -2652,32 +2664,43 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     markDirty()
   }
 
+  private fun ndsBrushCells(grid: NdsGrid, x: Int, z: Int): List<Pair<Int, Int>> =
+      ndsBrushFootprint(
+          x,
+          z,
+          (ndsTileBrushSpinner.value as Number).toInt(),
+          grid.cols,
+          grid.rows,
+      )
+
   private fun paintNdsCell(x: Int, z: Int) {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     val layer = view.activeLayer
-    if (ndsPaintMode.selectedIndex == 3) {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.HEIGHT,
-              layer,
-              x,
-              z,
-              map.grid.heightAt(layer, x, z),
-              view.activeHeight.coerceIn(-32.0, 32.0),
-          ))
-      map.grid.setHeight(layer, x, z, view.activeHeight)
-    } else {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.TILE,
-              layer,
-              x,
-              z,
-              map.grid.tileAt(layer, x, z),
-              view.activeTile,
-          ))
-      map.grid.setTile(layer, x, z, view.activeTile)
+    for ((cellX, cellZ) in ndsBrushCells(map.grid, x, z)) {
+      if (ndsPaintMode.selectedIndex == 3) {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.HEIGHT,
+                layer,
+                cellX,
+                cellZ,
+                map.grid.heightAt(layer, cellX, cellZ),
+                view.activeHeight.coerceIn(-32.0, 32.0),
+            ))
+        map.grid.setHeight(layer, cellX, cellZ, view.activeHeight)
+      } else {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.TILE,
+                layer,
+                cellX,
+                cellZ,
+                map.grid.tileAt(layer, cellX, cellZ),
+                view.activeTile,
+            ))
+        map.grid.setTile(layer, cellX, cellZ, view.activeTile)
+      }
     }
     markDirty()
     view.asComponent().repaint()
@@ -2688,28 +2711,30 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     val layer = view.activeLayer
-    if (ndsPaintMode.selectedIndex == 3) {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.HEIGHT,
-              layer,
-              x,
-              z,
-              map.grid.heightAt(layer, x, z),
-              0.0,
-          ))
-      map.grid.setHeight(layer, x, z, 0.0)
-    } else {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.TILE,
-              layer,
-              x,
-              z,
-              map.grid.tileAt(layer, x, z),
-              -1,
-          ))
-      map.grid.setTile(layer, x, z, -1)
+    for ((cellX, cellZ) in ndsBrushCells(map.grid, x, z)) {
+      if (ndsPaintMode.selectedIndex == 3) {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.HEIGHT,
+                layer,
+                cellX,
+                cellZ,
+                map.grid.heightAt(layer, cellX, cellZ),
+                0.0,
+            ))
+        map.grid.setHeight(layer, cellX, cellZ, 0.0)
+      } else {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.TILE,
+                layer,
+                cellX,
+                cellZ,
+                map.grid.tileAt(layer, cellX, cellZ),
+                -1,
+            ))
+        map.grid.setTile(layer, cellX, cellZ, -1)
+      }
     }
     markDirty()
     view.asComponent().repaint()
@@ -2719,28 +2744,30 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     val map = currentNdsMap ?: return
     val view = view() ?: return
     val masked = value and 0xFF
-    if (ndsPaintMode.selectedIndex == 2) {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.PERMISSION,
-              0,
-              x,
-              z,
-              map.grid.permissionAt(x, z),
-              masked,
-          ))
-      map.grid.setPermission(x, z, value)
-    } else {
-      ndsHistory.recordCell(
-          NdsCellEdit(
-              NdsCellKind.COLLISION,
-              0,
-              x,
-              z,
-              map.grid.collisionAt(x, z),
-              masked,
-          ))
-      map.grid.setCollision(x, z, value)
+    for ((cellX, cellZ) in ndsBrushCells(map.grid, x, z)) {
+      if (ndsPaintMode.selectedIndex == 2) {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.PERMISSION,
+                0,
+                cellX,
+                cellZ,
+                map.grid.permissionAt(cellX, cellZ),
+                masked,
+            ))
+        map.grid.setPermission(cellX, cellZ, value)
+      } else {
+        ndsHistory.recordCell(
+            NdsCellEdit(
+                NdsCellKind.COLLISION,
+                0,
+                cellX,
+                cellZ,
+                map.grid.collisionAt(cellX, cellZ),
+                masked,
+            ))
+        map.grid.setCollision(cellX, cellZ, value)
+      }
     }
     markDirty()
     view.asComponent().repaint()

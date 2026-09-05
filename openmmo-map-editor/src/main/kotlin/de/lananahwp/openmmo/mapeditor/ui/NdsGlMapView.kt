@@ -33,15 +33,16 @@ class NdsGlMapView(
     private val onStrokeBegin: () -> Unit = {},
 ) : GLCanvas(GLCapabilities(GLProfile.get(GLProfile.GL2))), GLEventListener, Nds3DView {
 
-  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION }
+  enum class PaintMode { TILE, COLLISION, PERMISSION, ELEVATION, NONE }
 
   override fun setPaintMode(mode: Int) {
     paintMode =
         when (mode) {
+          0 -> PaintMode.TILE
           1 -> PaintMode.COLLISION
           2 -> PaintMode.PERMISSION
           3 -> PaintMode.ELEVATION
-          else -> PaintMode.TILE
+          else -> PaintMode.NONE
         }
   }
 
@@ -65,6 +66,11 @@ class NdsGlMapView(
   override var activeLayer = 0
   override var activeTile = 0
   override var activeHeight = 0.0
+  override var brushSize = 1
+    set(value) {
+      field = value.coerceIn(1, 32)
+      repaint()
+    }
   override var brushCollision = 1
   override var showGrid = true
   override var showCollision = false
@@ -183,6 +189,7 @@ class NdsGlMapView(
       PaintMode.COLLISION -> onPaintCollision(x, z, brushCollision)
       PaintMode.PERMISSION -> onPaintCollision(x, z, brushCollision)
       PaintMode.ELEVATION -> if (erase) onEraseCell(x, z) else onPaintCell(x, z)
+      PaintMode.NONE -> Unit
     }
   }
 
@@ -280,13 +287,15 @@ class NdsGlMapView(
       }
       gl.glEnd()
     }
-    hoverCell?.let { (hx, hz) ->
+    if (paintMode != PaintMode.NONE) hoverCell?.let { (hx, hz) ->
       gl.glColor4f(1f, 1f, 0.4f, 0.35f)
       gl.glBegin(GL2.GL_QUADS)
-      groundVertex(gl, hx.toDouble(), 0.01, hz.toDouble(), xf)
-      groundVertex(gl, (hx + 1).toDouble(), 0.01, hz.toDouble(), xf)
-      groundVertex(gl, (hx + 1).toDouble(), 0.01, (hz + 1).toDouble(), xf)
-      groundVertex(gl, hx.toDouble(), 0.01, (hz + 1).toDouble(), xf)
+      for ((cellX, cellZ) in ndsBrushFootprint(hx, hz, brushSize, gcols, grows)) {
+        groundVertex(gl, cellX.toDouble(), 0.01, cellZ.toDouble(), xf)
+        groundVertex(gl, (cellX + 1).toDouble(), 0.01, cellZ.toDouble(), xf)
+        groundVertex(gl, (cellX + 1).toDouble(), 0.01, (cellZ + 1).toDouble(), xf)
+        groundVertex(gl, cellX.toDouble(), 0.01, (cellZ + 1).toDouble(), xf)
+      }
       gl.glEnd()
     }
     gl.glDisable(GL2.GL_BLEND)
