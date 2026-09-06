@@ -226,6 +226,23 @@ class NdsPropsPanel(
   fun refreshProps(preferredSelection: String?) =
       refreshProps(preferredSelection?.let(::setOf).orEmpty(), preferredSelection)
 
+  /** Updates only the moved rows and transform controls during a viewport drag. */
+  fun refreshMovedProps(ids: Set<String>, primary: String?) {
+    val props = map?.props.orEmpty()
+    syncing = true
+    props.forEachIndexed { index, prop ->
+      if (prop.id in ids && index < listModel.size()) listModel[index] = label(index, prop)
+    }
+    val selected = props.firstOrNull { it.id == primary }
+    if (selected != null) {
+      x.value = selected.x.toDouble(); y.value = selected.y.toDouble(); z.value = selected.z.toDouble()
+      rx.value = selected.rotationX.toDouble(); ry.value = selected.rotationY.toDouble(); rz.value = selected.rotationZ.toDouble()
+      sx.value = selected.scaleX.toDouble(); sy.value = selected.scaleY.toDouble(); sz.value = selected.scaleZ.toDouble()
+      mirrorX.isSelected = selected.mirrorX; mirrorZ.isSelected = selected.mirrorZ
+    }
+    syncing = false
+  }
+
   fun selectProp(id: String?, notify: Boolean = false) =
       selectProps(id?.let(::setOf).orEmpty(), id, notify)
   fun selectProps(ids: Set<String>, primary: String? = ids.lastOrNull(), notify: Boolean = false) {

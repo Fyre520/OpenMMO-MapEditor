@@ -207,7 +207,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       )
   private val zoomLabel = JLabel("100%")
   private val status = JLabel("Open a decomp (File -> Open Decomp)")
-  private val ndsCursorCoordinates = JLabel("Cursor: X —, Z —")
+  private val ndsCursorCoordinates = JLabel("Cursor: X —, Z —  |  Height: —")
   private var ndsCursorCell: Pair<Int, Int>? = null
 
   private val metatileContainer = JPanel(BorderLayout())
@@ -676,6 +676,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     ndsLayerSpinner.preferredSize = Dimension(60, ndsLayerSpinner.preferredSize.height)
     ndsLayerSpinner.addChangeListener {
       view()?.activeLayer = (ndsLayerSpinner.value as Number).toInt()
+      updateNdsCursorCoordinates(ndsCursorCell)
     }
     ndsHeightSpinner.editor = JSpinner.NumberEditor(ndsHeightSpinner, "0.####")
     ndsHeightSpinner.preferredSize = Dimension(72, ndsHeightSpinner.preferredSize.height)
@@ -1744,10 +1745,16 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   private fun updateNdsCursorCoordinates(cell: Pair<Int, Int>?) {
     ndsCursorCell = cell
     ndsCursorCoordinates.text = if (cell == null) {
-      "Cursor: X —, Z —"
+      "Cursor: X —, Z —  |  Height: —"
     } else {
       val (x, z) = cell
-      "Cursor: X $x, Z $z  |  Matrix cell: X ${x / NdsGrid.COLS}, Z ${z / NdsGrid.ROWS}"
+      val layer = (ndsLayerSpinner.value as Number).toInt()
+      val grid = currentNdsMap?.grid
+      val height = grid?.takeIf { x in 0 until it.cols && z in 0 until it.rows }
+          ?.heightAt(layer, x, z)
+      val heightText = height?.toString() ?: "—"
+      "Cursor: X $x, Z $z  |  Layer $layer height: $heightText  |  " +
+          "Matrix cell: X ${x / NdsGrid.COLS}, Z ${z / NdsGrid.ROWS}"
     }
   }
 
@@ -3581,14 +3588,18 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   /** Consumes viewport clicks while one of the prop modes is active. */
   private fun handleNdsCellInteraction(hit: NdsPointerHit, dragging: Boolean): Boolean {
     val map = currentNdsMap ?: return false
-    return when (ndsPaintMode.selectedIndex) {
-      0 -> {
-        if (!dragging) ndsTilePickGesture = hit.altDown
-        if (ndsTilePickGesture) {
-          if (!dragging) pickNdsPaintedTile(hit.cellX, hit.cellZ)
-          true
-        } else false
+    if (!dragging) {
+      ndsTilePickGesture = hit.altDown
+      if (hit.altDown) {
+        if (pickNdsPaintedTile(hit.cellX, hit.cellZ)) ndsPaintMode.selectedIndex = 0
+        // An eyedropper click must never fall through to the previously active editing tool.
+        return true
       }
+    } else if (ndsTilePickGesture) {
+      return true
+    }
+    return when (ndsPaintMode.selectedIndex) {
+      0 -> false
       4 -> {
         if (!dragging) {
           // The drag that is about to start undoes as one step, measured from here.
@@ -3660,7 +3671,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
               selected.x = initial.first + dx
               selected.z = initial.second + dz
             }
-            ndsPropsPanel.refreshProps(selectedNdsPropIds, selectedNdsPropId)
+            ndsPropsPanel.refreshMovedProps(selectedNdsPropIds, selectedNdsPropId)
             markDirty()
             ndsDragSceneBefore?.let {
               ndsHistory.recordSceneDrag("move ${selectedNdsPropIds.size} prop(s)", it, NdsSceneSnapshot.of(map))
@@ -4004,20 +4015,21 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
   }
 
   /** Alt+click eyedropper for built-in and project-local painted tiles. */
-  private fun pickNdsPaintedTile(x: Int?, z: Int?) {
-    val map = currentNdsMap ?: return
-    val project = currentNdsHolder?.project ?: return
-    if (x == null || z == null) return
+  private fun pickNdsPaintedTile(x: Int?, z: Int?): Boolean {
+    val map = currentNdsMap ?: return false
+    val project = currentNdsHolder?.project ?: return false
+    if (x == null || z == null) return false
     val footprints = project.customTileStore.tiles()
         .associate { it.index to (it.width to it.height) }
     val hit = ndsPlacedTileAt(map.grid, x, z, footprints)
     if (hit == null) {
       status.text = "No painted tile found on that square"
-      return
+      return false
     }
     refreshNdsTileCombo(hit.tile)
     val label = ndsTileChoices.getOrNull(ndsTileCombo.selectedIndex)?.label ?: "tile #${hit.tile}"
     status.text = "Picked $label from layer ${hit.layer}"
+    return true
   }
 
   /**
@@ -4767,6 +4779,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
     when (step) {
       is NdsGridStep -> {
         view()?.asComponent()?.repaint()
+        updateNdsCursorCoordinates(ndsCursorCell)
         status.text = "$verb ${step.edits.size} ${step.label} edit(s)"
       }
       is NdsSceneStep -> {
@@ -4874,6 +4887,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       return
     }
     markDirty()
+    updateNdsCursorCoordinates(ndsCursorCell)
     view.asComponent().repaint()
   }
 
@@ -4918,6 +4932,7 @@ class EditorFrame(decompDirs: List<File>) : JFrame("OpenMMO Map Editor") {
       }
     }
     markDirty()
+    updateNdsCursorCoordinates(ndsCursorCell)
     view.asComponent().repaint()
   }
 

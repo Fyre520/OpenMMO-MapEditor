@@ -217,7 +217,8 @@ class NdsSoftwareMapView(
             lastY = e.y
             if (e.button == MouseEvent.BUTTON1) {
               val hit =
-                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  if (surfacePicking) surfacePointerHit(
+                      e.x, e.y, e.isShiftDown, e.isControlDown, e.isAltDown)
                   else pointerHit(e.x, e.y, includeModelGroup = true)?.copy(
                       shiftDown = e.isShiftDown,
                       ctrlDown = e.isControlDown,
@@ -270,7 +271,8 @@ class NdsSoftwareMapView(
               // Surface picking keeps resolving the mesh while dragging, because painting a
               // selection across it needs the tile under the geometry, not under the ground plane.
               val hit =
-                  if (surfacePicking) surfacePointerHit(e.x, e.y, e.isShiftDown, e.isControlDown)
+                  if (surfacePicking) surfacePointerHit(
+                      e.x, e.y, e.isShiftDown, e.isControlDown, e.isAltDown)
                   else pointerHit(e.x, e.y, includeModelGroup = false)?.copy(
                       shiftDown = e.isShiftDown,
                       ctrlDown = e.isControlDown,
@@ -984,7 +986,13 @@ class NdsSoftwareMapView(
    * Kept separate from [pointerHit] so the paint and object modes keep resolving clicks exactly as
    * they did; nothing here is on their path.
    */
-  private fun surfacePointerHit(mx: Int, my: Int, shiftDown: Boolean, ctrlDown: Boolean): NdsPointerHit? {
+  private fun surfacePointerHit(
+      mx: Int,
+      my: Int,
+      shiftDown: Boolean,
+      ctrlDown: Boolean,
+      altDown: Boolean,
+  ): NdsPointerHit? {
     val ground = pickRay(mx, my)?.let(::groundPoint)
     val cell = ground?.let(::groundCell)
     val transform = modelXform()
@@ -1012,6 +1020,7 @@ class NdsSoftwareMapView(
         surface?.triangle?.texture,
         shiftDown,
         ctrlDown,
+        altDown,
     )
   }
 

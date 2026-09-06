@@ -11,9 +11,34 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class NdsPropFeaturesTest {
+  @Test
+  fun `moving one prop reuses unchanged prop geometry`() {
+    val root = Files.createTempDirectory("nds-prop-transform-cache").toFile()
+    try {
+      val project = NdsProject(root)
+      val model = project.saveExtractedProp(
+          "Cached", NdsMeshSnapshot(listOf(unitTriangle()), emptyMap(), emptyMap()), "TEST")
+      val map = NdsMap("TEST", 1, NdsMapHeader(), NdsEvents(), NdsGrid())
+      map.props += project.createProp(model.key, 1f, 2f).copy(id = "stationary")
+      map.props += project.createProp(model.key, 3f, 4f).copy(id = "moving")
+
+      val before = project.buildingTrianglesFor(map)
+      map.props[1].x = 5f
+      val after = project.buildingTrianglesFor(map)
+
+      assertSame(before[0], after[0], "unchanged prop should retain its transformed triangle")
+      assertNotSame(before[1], after[1], "moved prop must rebuild its transformed triangle")
+      assertEquals(5f, after[1].ax)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
   @Test
   fun `prop mirrors in local X and Z and persists the toggles`() {
     val root = Files.createTempDirectory("nds-mirrored-prop").toFile()

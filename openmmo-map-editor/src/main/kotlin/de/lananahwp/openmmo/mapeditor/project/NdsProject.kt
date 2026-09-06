@@ -768,6 +768,20 @@ class NdsProject(
   private val propTexturePackCache = HashMap<String, List<ByteArray>>()
   private val terrainTriangleCache = HashMap<String, List<de.lananahwp.openmmo.mapeditor.core.NdsTri>>()
 
+  /**
+   * World-space geometry for unchanged prop placements. During a drag only the moved props need
+   * their vertices transformed; rebuilding every other visible prop made pointer updates scale
+   * with the total number of props on the map.
+   */
+  private data class TransformedPropCacheEntry(
+      val snapshot: NdsProp,
+      val namespaceTextures: Boolean,
+      val source: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+      val triangles: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
+  )
+
+  private val transformedPropCache = HashMap<String, TransformedPropCacheEntry>()
+
   /** Baked meshes for extracted props; a null value caches "this key is not an extracted prop". */
   private val propMeshCache = HashMap<String, de.lananahwp.openmmo.mapeditor.core.NdsMeshSnapshot?>()
 
@@ -2042,33 +2056,50 @@ class NdsProject(
 
   private fun editablePropTriangles(map: NdsMap): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
     val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
+    val activeIds = HashSet<String>(map.props.size)
     for (prop in map.props) {
+      activeIds += prop.id
       val imported = !prop.modelKey.startsWith("rom:")
       val namespaceTextures = imported && propHasOwnTextures(prop.modelKey)
-      out += transformedPropTriangles(prop, namespaceTextures)
+      val source = propModelTriangles(prop.modelKey)
+      val cached = transformedPropCache[prop.id]
+      if (cached != null && cached.snapshot == prop &&
+          cached.namespaceTextures == namespaceTextures && cached.source === source) {
+        out += cached.triangles
+      } else {
+        val triangles = transformedPropTriangles(prop, namespaceTextures, source)
+        transformedPropCache[prop.id] =
+            TransformedPropCacheEntry(prop.copy(), namespaceTextures, source, triangles)
+        out += triangles
+      }
     }
+    // Keep the cache bounded when props are removed or a different map is opened.
+    transformedPropCache.keys.retainAll(activeIds)
     return out
   }
 
   private fun transformedPropTriangles(
       prop: NdsProp,
       namespaceTextures: Boolean,
+      source: List<de.lananahwp.openmmo.mapeditor.core.NdsTri>,
   ): List<de.lananahwp.openmmo.mapeditor.core.NdsTri> {
-    val out = mutableListOf<de.lananahwp.openmmo.mapeditor.core.NdsTri>()
-    for (tri in propModelTriangles(prop.modelKey)) {
+    val out = ArrayList<de.lananahwp.openmmo.mapeditor.core.NdsTri>(source.size)
+    // These values describe the prop, not an individual vertex. Computing them once is especially
+    // important for detailed models, which otherwise repeated nine trig calls per triangle.
+    val rxCos = kotlin.math.cos(Math.toRadians(prop.rotationX.toDouble()))
+    val rxSin = kotlin.math.sin(Math.toRadians(prop.rotationX.toDouble()))
+    val ryCos = kotlin.math.cos(Math.toRadians(prop.rotationY.toDouble()))
+    val rySin = kotlin.math.sin(Math.toRadians(prop.rotationY.toDouble()))
+    val rzCos = kotlin.math.cos(Math.toRadians(prop.rotationZ.toDouble()))
+    val rzSin = kotlin.math.sin(Math.toRadians(prop.rotationZ.toDouble()))
+    for (tri in source) {
         fun transform(x: Float, y: Float, z: Float): FloatArray {
           var px = (if (prop.mirrorX) -x else x).toDouble()
           var py = y.toDouble()
           var pz = (if (prop.mirrorZ) -z else z).toDouble()
-          var c = kotlin.math.cos(Math.toRadians(prop.rotationX.toDouble()))
-          var s = kotlin.math.sin(Math.toRadians(prop.rotationX.toDouble()))
-          val y1 = py * c - pz * s; val z1 = py * s + pz * c; py = y1; pz = z1
-          c = kotlin.math.cos(Math.toRadians(prop.rotationY.toDouble()))
-          s = kotlin.math.sin(Math.toRadians(prop.rotationY.toDouble()))
-          val x2 = px * c + pz * s; val z2 = -px * s + pz * c; px = x2; pz = z2
-          c = kotlin.math.cos(Math.toRadians(prop.rotationZ.toDouble()))
-          s = kotlin.math.sin(Math.toRadians(prop.rotationZ.toDouble()))
-          val x3 = px * c - py * s; val y3 = px * s + py * c; px = x3; py = y3
+          val y1 = py * rxCos - pz * rxSin; val z1 = py * rxSin + pz * rxCos; py = y1; pz = z1
+          val x2 = px * ryCos + pz * rySin; val z2 = -px * rySin + pz * ryCos; px = x2; pz = z2
+          val x3 = px * rzCos - py * rzSin; val y3 = px * rzSin + py * rzCos; px = x3; py = y3
           return floatArrayOf(
               prop.x + px.toFloat() * prop.scaleX,
               prop.y + py.toFloat() * prop.scaleY,
